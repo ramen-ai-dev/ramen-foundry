@@ -6,403 +6,290 @@
 
 <h1 align="center">ramen-foundry</h1>
 
-<p align="center"><strong>LangGraph governance nodes and human-review workflow templates powered by ramen-ai.</strong></p>
+<p align="center"><strong>Turnkey, legally governed AI agent templates powered by LangGraph and the ramen-ai stateless L2 execution boundary.</strong></p>
 
 <p align="center">
-  <a href="https://ramenai.dev">ramen-ai</a> ·
-  <a href="https://github.com/ramen-ai-dev/ramen-ai-integrations">Integrations</a> ·
-  <a href="https://github.com/ramen-ai-dev/ramen-ai-integrations/tree/master/core-clients/python">Python SDK</a> ·
-  <a href="https://ramenai.dev/pricing">Get an API key</a>
+  <a href="https://ramenai.dev">Platform</a> ·
+  <a href="https://ramenai.dev/pricing">API keys</a> ·
+  <a href="https://ramenai.dev/llms.txt">Architecture</a> ·
+  <a href="https://github.com/ramen-ai-dev/ramen-ai-integrations">SDKs and integrations</a>
 </p>
 
 ---
 
-`ramen-foundry` supplies reusable Python nodes for putting deterministic ramen-ai governance boundaries inside LangGraph workflows. It supports two enforcement points:
+`ramen-foundry` is a Python library of policy-bound LangGraph components and agent templates. It places ramen-ai between model intent and consequential execution, then releases an action only when the semantic verdict allows it **and** the returned Ed25519 receipt verifies locally.
 
-- **Before tool execution:** `RamenToolNode` evaluates a canonical tool call, verifies its governance receipt, and executes only registered, allowed calls.
-- **Before final content release:** `RamenGovernedNode` delegates generation, semantic evaluation, and one automatic healing retry to ramen-ai's governed-generation cascade.
+Use the low-level nodes to govern an existing graph, or start with a domain template:
 
-The package also includes `ResumeScreeningAgent`, an evidence-focused HR workflow template whose output always requires review by a human decision-maker.
+- **hrtech** — evidence-focused resume review for a human decision-maker.
+- **devbox-shield** — workstation inspection, cleanup, and process control.
+- **db-shield** — database triage, query inspection, and deadlock diagnosis.
+- **scout-shield** — injection-resistant web research and publication.
 
-## Architecture
+The package supplies governance boundaries and workflow structure; host applications retain ownership of credentials, model adapters, tools, infrastructure permissions, and human approvals. Policy enforcement supports compliance programs but does not by itself constitute legal advice or certification.
 
-### Govern a tool before execution
-
-```mermaid
-sequenceDiagram
-    participant G as LangGraph
-    participant F as RamenToolNode
-    participant R as ramen-ai API
-    participant T as Registered tool
-    participant L as LLM node
-
-    G->>F: state["tool_invocation"]
-    F->>F: Canonicalize {tool, arguments}
-    F->>R: POST /api/v1/paas/evaluate
-    R-->>F: Verdict + signed receipt
-    F->>F: Require allowed and receipt_verified
-    alt Allowed and verified
-        F->>T: invoke(arguments)
-        T-->>F: Tool result
-        F-->>L: ToolMessage + Command
-    else Blocked, unavailable, or unverifiable
-        F-->>L: Error ToolMessage + Command
-    end
-```
-
-`RamenToolNode` fails closed. The tool is not executed when evaluation fails, policy blocks the call, receipt verification fails, the tool is not registered, or tool execution raises an exception.
-
-### Govern final content and require human review
-
-```mermaid
-flowchart LR
-    A[Application state] --> B[Application-supplied chat model]
-    B -->|Draft neutral evidence plan| C[RamenGovernedNode]
-    C --> D[ramen-ai governed generation]
-    D --> E[Semantic evaluation]
-    E -->|Needs healing| D
-    E -->|Released| F[Evidence-focused report]
-    F --> G[Human decision-maker]
-```
-
-The included HR template compiles the graph `START → draft_review_prompt → governed_resume_review → END`. Its `requires_human_review` result is a mandatory application-level signal; the template does **not** install a LangGraph interrupt, checkpoint, or approval UI.
-
-## Requirements
-
-- Python 3.10 or newer
-- A [ramen-ai API key](https://ramenai.dev/pricing)
-- A concrete LangChain `BaseChatModel` implementation when using `ResumeScreeningAgent`
-- A provider key for bring-your-own-key generation, unless provider credentials are managed by your ramen-ai enterprise deployment
-
-Runtime dependencies are pinned by this package:
-
-| Dependency | Version |
-|---|---:|
-| `ramen-ai-core` | `0.3.2` |
-| `langgraph` | `1.2.11` |
-| `langchain-core` | `1.6.0` |
-| `pydantic` | `2.13.4` |
-
-## Install from source
+## Install
 
 ```bash
-git clone https://github.com/ramen-ai-dev/ramen-foundry.git
-cd ramen-foundry
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
+pip install ramen-foundry
 ```
 
-This source-install path is documented because publication of `ramen-foundry` to a package registry is not asserted by this repository.
-
-## Credentials and provider routing
-
-Keep credentials in environment variables and pass them explicitly to the SDK and Foundry nodes:
+Python 3.10 or newer is required. Obtain a ramen-ai API key at [ramenai.dev/pricing](https://ramenai.dev/pricing), then provide credentials through your environment or secret manager:
 
 ```bash
 export RAMEN_API_KEY="your-ramen-api-key"
 export OPENAI_API_KEY="your-provider-api-key"
 ```
 
+Provider keys are required for bring-your-own-key inference unless your ramen-ai enterprise deployment supplies managed credentials. Supported provider routes are `openai`, `anthropic`, `google`, `synthetic`, and `hyperbolic`.
+
+## Five-line quickstart
+
+Assume `inspect_directory` is an application-defined LangChain `BaseTool` whose registered name is also `inspect_directory`:
+
 ```python
-import os
-
+from os import environ
 from ramen_ai import RamenClient
-
-client = RamenClient(api_key=os.environ["RAMEN_API_KEY"])
-provider_key = os.environ["OPENAI_API_KEY"]
+from ramen_foundry import DevboxShieldAgent, ToolInvocation
+agent = DevboxShieldAgent(client=RamenClient(environ["RAMEN_API_KEY"]), tools={"inspect_directory": inspect_directory})
+command = agent.execute(ToolInvocation(name="inspect_directory", arguments={"path": "./build"}, tool_call_id="inspect-1"))
 ```
 
-Supported provider names are `openai`, `anthropic`, `google`, `synthetic`, and `hyperbolic`. When supplied, `provider_key` and `provider_name` are forwarded as request-level provider headers. Omit them only when your ramen-ai deployment supplies managed provider credentials.
+`command` routes back to the configured LangGraph `llm_node` (default: `assistant`) with a `ToolMessage`, a cleared invocation, and either `governance_error=None` or an explicit denial/failure reason.
 
-`RamenClient` does not read `RAMEN_API_KEY` automatically; the application must pass it to `RamenClient(api_key=...)`.
+## Core engine architecture
 
-## Usage
+```mermaid
+sequenceDiagram
+    participant A as Agent / LangGraph
+    participant T as RamenToolNode
+    participant R as ramen-ai L2 boundary
+    participant C as Host capability
 
-### Guard a resolved tool call
+    A->>T: Resolved ToolInvocation
+    T->>T: Canonicalize tool + arguments
+    T->>R: Stateless semantic evaluation
+    R-->>T: Verdict + Ed25519 receipt
+    T->>T: Verify signature and input binding
+    alt allowed and receipt_verified
+        T->>C: Execute registered BaseTool
+        C-->>A: ToolMessage + Command
+    else denied, unavailable, or unverifiable
+        T-->>A: Error ToolMessage; capability not executed
+    end
+```
+
+### `RamenToolNode`: pre-execution interception
+
+`RamenToolNode` is the consequential-action boundary used by all three Shield agents. It:
+
+1. Validates a resolved `ToolInvocation`.
+2. Serializes `{"tool": name, "arguments": arguments}` as deterministic compact JSON.
+3. Evaluates that payload against explicit policy UUIDs, stable bundle slugs, or both.
+4. Requires both `allowed=True` and `receipt_verified=True`.
+5. Invokes only a registered LangChain `BaseTool`.
+6. Returns a LangGraph `Command` to the configured model/planner node.
+
+Pre-execution failures—evaluation errors, blocked verdicts, missing or invalid receipts, and unknown tools—fail closed before a host capability is invoked. A host tool can still perform a partial side effect before raising an exception; that failure is reported explicitly but cannot be rolled back by Foundry. Safety-significant values must be explicit invocation arguments, and consequential tools should be idempotent or carry operation IDs so callers do not blindly retry an uncertain outcome. Hidden tool-side behavior cannot be semantically evaluated.
+
+### `RamenGovernedNode`: self-correcting generation
+
+```mermaid
+flowchart LR
+    P[Prompt] --> G[ramen-ai governed generation]
+    G --> M[Provider model]
+    M --> E[Semantic evaluation]
+    E -->|Needs healing| G
+    E -->|Allowed| V[Verified released content]
+    E -->|Retry exhausted| B[Blocked; no content released]
+```
+
+`RamenGovernedNode` sends a prompt through the active governed-generation cascade. ramen-ai manages the provider call, semantic evaluation, and one healing retry. Only approved final content is written to graph state. Denials and transport/protocol failures produce `governed_content=None` and an explicit `governance_error`; blocked drafts are never released.
+
+The Foundry node is synchronous and non-streaming. The underlying `ramen-ai-core` SDK also exposes streaming governed generation for applications that need progress events.
+
+## Template catalogue
+
+| Template | Public class | Bound policy scope | Consequential capabilities |
+|---|---|---|---|
+| `hrtech` | `ResumeScreeningAgent` | EU AI Act Annex III Proxy Bias Interceptor (`0d5ed2af-5e98-4a8c-92c3-dea26c07bf9a`) | Governed evidence-focused report; mandatory human review |
+| `devbox-shield` | `DevboxShieldAgent` | `ramen__shield_core_it`: Destructive Execution, Infrastructure Abuse, Secret Exfiltration | Directory inspection, path deletion, process termination |
+| `db-shield` | `DbShieldAgent` | `ramen__shield_core_it`: Destructive Execution and Infrastructure Abuse | Query/plan inspection, deadlock diagnosis, backend termination |
+| `scout-shield` | `ScoutShieldAgent` | `ramen__shield_core_it`: OWASP ASI06 Indirect Prompt Injection and Secret Exfiltration | URL retrieval, extraction, approved local reads, publication |
+
+`ramen__shield_core_it` is an immutable production bundle slug. The backend resolves it to the currently active policy UUIDs at request time; the signed receipt records the exact resolved UUIDs that ran. This lets policy implementations evolve without requiring client releases.
+
+### hrtech
+
+`ResumeScreeningAgent` compiles:
+
+```text
+START → draft_review_prompt → governed_resume_review → END
+```
+
+An application-supplied `BaseChatModel` drafts a neutral evidence-collection plan. `RamenGovernedNode` then generates the final report under the fixed Proxy Bias Interceptor. The result never represents a hiring, rejection, ranking, or eligibility decision and always returns `requires_human_review=True`.
 
 ```python
-import os
-
-from langchain_core.tools import tool
-from ramen_ai import RamenClient
-from ramen_foundry import RamenToolNode, ToolInvocation
-
-
-@tool
-def lookup_inventory(sku: str) -> dict[str, object]:
-    """Return inventory details for a SKU."""
-    return {"sku": sku, "available": True}
-
-
-client = RamenClient(api_key=os.environ["RAMEN_API_KEY"])
-
-guarded_tools = RamenToolNode(
+agent = ResumeScreeningAgent(
+    llm=chat_model,
     client=client,
-    tools={"lookup_inventory": lookup_inventory},
-    llm_node="assistant",
-    bundle_ids=["your-bundle-id"],
-    provider_key=os.environ.get("OPENAI_API_KEY"),
+    provider_key=provider_key,
     provider_name="openai",
 )
-
-command = guarded_tools(
-    {
-        "tool_invocation": ToolInvocation(
-            name="lookup_inventory",
-            arguments={"sku": "SKU-123"},
-            tool_call_id="call-1",
-        )
-    }
-)
-```
-
-Add `guarded_tools` to your graph as the node that receives resolved tool calls. Every return path produces a LangGraph `Command` that routes to `llm_node`. Its state update contains:
-
-| Key | Value |
-|---|---|
-| `messages` | One success or error `ToolMessage` |
-| `governance_error` | `None` on success; a reason string on failure |
-| `tool_invocation` | Cleared to `None` |
-
-A call proceeds only when the ramen-ai verdict contains both `allowed=True` and `receipt_verified=True`.
-
-### Generate governed final content
-
-```python
-import os
-
-from ramen_ai import RamenClient
-from ramen_foundry import RamenGovernedNode
-
-client = RamenClient(api_key=os.environ["RAMEN_API_KEY"])
-
-generate_final = RamenGovernedNode(
-    client=client,
-    policy_ids=["your-policy-id"],
-    provider_key=os.environ["OPENAI_API_KEY"],
-    provider_name="openai",
-)
-
-update = generate_final(
-    {
-        "governed_prompt": (
-            "Write the final customer response using only the approved facts."
-        )
-    }
-)
-
-if update["governance_error"] is None:
-    print(update["governed_content"])
-```
-
-`RamenGovernedNode` uses the synchronous `RamenClient.generate_governed` method with one healing retry. It does not stream. Released output is written to `governed_content`; blocked or failed generation writes `None` there and provides a safe `governance_error` instead.
-
-### Run the human-reviewed resume template
-
-The template accepts any concrete `BaseChatModel`; install and configure the adapter used by your application separately.
-
-```python
-import os
-
-from langchain_core.language_models.chat_models import BaseChatModel
-from ramen_ai import RamenClient
-from ramen_foundry import ResumeScreeningAgent, ResumeScreeningRequest
-
-
-def review_resume(llm: BaseChatModel) -> None:
-    client = RamenClient(api_key=os.environ["RAMEN_API_KEY"])
-    agent = ResumeScreeningAgent(
-        llm=llm,
-        client=client,
-        provider_key=os.environ.get("OPENAI_API_KEY"),
-        provider_name="openai",
+result = agent.screen(
+    ResumeScreeningRequest(
+        resume_text="Candidate resume text",
+        job_description="Role requirements",
     )
-
-    result = agent.screen(
-        ResumeScreeningRequest(
-            resume_text="Candidate resume text",
-            job_description="Role requirements",
-        )
-    )
-
-    if result.governance_error:
-        print(result.governance_error)
-        return
-
-    assert result.requires_human_review is True
-    print(result.report)
-```
-
-The template uses the fixed EU AI Act Proxy Bias policy ID `0d5ed2af-5e98-4a8c-92c3-dea26c07bf9a`. It asks for job-relevant evidence, missing information, and reviewer questions. It never asks the model to rank candidates or recommend hiring, rejection, or eligibility decisions.
-
-## Public API reference
-
-All supported top-level imports come from `ramen_foundry`:
-
-| Export | Purpose |
-|---|---|
-| `RamenToolNode` | Evaluates and verifies a resolved tool call before invoking a registered LangChain tool. |
-| `RamenGovernedNode` | Generates final content through the ramen-ai self-correcting cascade. |
-| `ToolInvocation` | Pydantic input model for a resolved tool call. |
-| `ResumeScreeningAgent` | Compiled evidence-focused resume-review workflow. |
-| `ResumeScreeningRequest` | Validated resume and job-description input model. |
-| `ResumeScreeningResult` | Governed report/error result with a mandatory human-review signal. |
-| `EU_AI_ACT_PROXY_BIAS_POLICY_ID` | Fixed policy UUID used by the resume workflow. |
-
-### `ToolInvocation`
-
-```python
-ToolInvocation(
-    *,
-    name: str,
-    arguments: dict[str, Any] = {},
-    tool_call_id: str,
 )
 ```
 
-| Field | Contract |
-|---|---|
-| `name` | Non-empty registered tool name. |
-| `arguments` | Tool keyword arguments; defaults to an empty dictionary. |
-| `tool_call_id` | Non-empty identifier copied to the returned `ToolMessage`. |
+The human-review flag is an application contract, not a built-in LangGraph interrupt or approval UI.
 
-### `RamenToolNode`
+### devbox-shield
+
+`DevboxShieldAgent` permits only these host-supplied tool names:
+
+| Tool name | Intended capability |
+|---|---|
+| `inspect_directory` | Inspect paths, sizes, and cleanup candidates without mutation. |
+| `delete_path` | Delete a host-approved cache, build output, or other path. |
+| `terminate_process` | Terminate an explicitly identified orphan process. |
+
+All requests are evaluated before tool lookup or execution. Attempts to remove system paths, user roots, shell configuration, credential material, or unrelated processes are expected to be denied by the bound Core IT controls. Hosts should additionally constrain deletion roots and process ownership inside their tool implementations.
+
+### db-shield
+
+`DbShieldAgent` permits:
+
+| Tool name | Intended capability |
+|---|---|
+| `explain_query` | Run `EXPLAIN` through a read-only adapter. |
+| `inspect_deadlocks` | Inspect lock graphs, blockers, and waiters. |
+| `run_query` | Run a parameterized diagnostic/read query. |
+| `terminate_backend` | Invoke a controlled `pg_terminate_backend` adapter. |
+
+Query text and parameters are included in the governed payload. Destructive operations such as `DROP TABLE`, `TRUNCATE`, unscoped deletes, and unindexed bulk mutation requests can therefore be intercepted before database execution. Use least-privilege database roles, statement timeouts, transactions, and explicit environment identifiers as defence in depth.
+
+### scout-shield
+
+`ScoutShieldAgent` permits:
+
+| Tool name | Intended capability |
+|---|---|
+| `fetch_url` | Retrieve an approved web resource. |
+| `extract_content` | Parse or normalize retrieved material. |
+| `read_local_file` | Read an explicitly approved research input. |
+| `publish_research` | Publish an approved research artifact. |
+
+Scraped pages, documents, and search results are untrusted input. Requests induced by embedded instructions—such as reading `.env`, collecting cloud credentials, curling secrets to an attacker, or publishing private data—are evaluated against OWASP ASI06 and secret-exfiltration controls before the capability can execute. Do not give research tools ambient access to secrets.
+
+## Operational agent API
+
+All three Shield agents share the same constructor and execution shape:
 
 ```python
-RamenToolNode(
+ShieldAgent(
     *,
     client: RamenClient,
     tools: Mapping[str, BaseTool],
-    llm_node: str,
-    policy_ids: Sequence[str] | None = None,
-    bundle_ids: Sequence[str] | None = None,
-    provider_key: str | None = None,
-    provider_name: str | None = None,
-)
-```
-
-At least one `policy_id` or `bundle_id` is required. Calling the node expects `state["tool_invocation"]` to contain a `ToolInvocation` or equivalent mapping and returns `Command`. Missing state or invalid input fails validation before API evaluation.
-
-The evaluated payload is deterministic compact JSON with sorted keys:
-
-```json
-{"arguments":{"sku":"SKU-123"},"tool":"lookup_inventory"}
-```
-
-### `RamenGovernedNode`
-
-```python
-RamenGovernedNode(
-    *,
-    client: RamenClient,
-    policy_ids: Sequence[str] | None = None,
-    bundle_ids: Sequence[str] | None = None,
-    prompt_key: str = "governed_prompt",
-    content_key: str = "governed_content",
-    provider_key: str | None = None,
-    provider_name: str | None = None,
-)
-```
-
-At least one policy or bundle is required. Calling the node expects a non-blank string at `state[prompt_key]` and returns a state-update dictionary.
-
-| Output key | Success | Blocked or failed |
-|---|---|---|
-| `content_key` | Released content | `None` |
-| `governed_evaluation` | Evaluation object | Not set |
-| `governance_error` | `None` | Safe reason string |
-| `messages` | `AIMessage` containing released content | `AIMessage` describing the failure without blocked content |
-
-### `ResumeScreeningAgent`
-
-```python
-ResumeScreeningAgent(
-    *,
-    llm: BaseChatModel,
-    client: RamenClient,
+    llm_node: str = "assistant",
     provider_key: str | None = None,
     provider_name: str | None = None,
 )
 
-agent.screen(request: ResumeScreeningRequest) -> ResumeScreeningResult
+agent.execute(invocation: ToolInvocation | Mapping[str, Any]) -> Command
+agent(state: Mapping[str, Any]) -> Command
 ```
 
-The supplied `llm` drafts only the neutral evidence plan. Final report generation passes through `RamenGovernedNode` and the fixed proxy-bias policy.
+- `execute(...)` is convenient for a resolved standalone action.
+- `agent(state)` makes the instance a LangGraph node and expects `state["tool_invocation"]`.
+- `tool_names` returns the sorted registered capability names.
+- Registry keys must match each `BaseTool.name` and must belong to the template's documented capability set.
+- The constructor always binds `bundle_ids=["ramen__shield_core_it"]`; callers cannot weaken or replace that scope.
 
-### `ResumeScreeningRequest`
+### BYOK configuration
 
 ```python
-ResumeScreeningRequest(
-    *,
-    resume_text: str,
-    job_description: str,
+agent = ScoutShieldAgent(
+    client=RamenClient(os.environ["RAMEN_API_KEY"]),
+    tools={"fetch_url": fetch_url},
+    provider_key=os.environ["OPENAI_API_KEY"],
+    provider_name="openai",
 )
 ```
 
-Both fields must be non-empty strings.
+Pass `provider_key` and `provider_name` together. Omit both only when managed provider credentials are provisioned server-side.
 
-### `ResumeScreeningResult`
+## Security guarantees
+
+### Stateless evaluation
+
+Each evaluation contains the resolved action, explicit arguments, policy/bundle scope, and minimal context. ramen-ai does not need the agent's mutable LangGraph state to decide whether that action may cross the L2 boundary.
+
+### Pre-execution interception
+
+The governance call completes before registered capability lookup and invocation. A blocked action never reaches the host tool. This is materially different from output-only filtering after a shell command, SQL statement, or outbound request has already run.
+
+### Fail-closed mechanics
+
+A host tool is invoked only after all pre-execution conditions hold:
+
+- The `ToolInvocation` is valid.
+- The evaluation request succeeds.
+- The semantic verdict is affirmative.
+- The V5 receipt is present and cryptographically verified.
+- The receipt's SHA-256 input binding matches the canonical action payload.
+- The tool name is registered for that template.
+
+For a valid invocation, governance and tool outcomes return an explicit `governance_error` on failure. Missing or malformed invocation state raises validation before evaluation and cannot execute a capability. Once an approved host tool begins, however, an exception may represent a partial side effect; inspect operation evidence before retrying.
+
+### Ed25519 cryptographic receipts
+
+`ramen-ai-core` verifies Ed25519 signatures and input hash binding locally. Receipts bind the verdict to the exact canonical input, resolved policy UUIDs, violations, statutory/control anchors, execution time, and outcome. Foundry requires `receipt_verified=True`; an unsigned or unverifiable allow is treated as a denial.
+
+### Defence in depth
+
+Semantic governance is not a replacement for OS permissions, sandboxing, read-only database roles, parameterized SQL, network egress controls, secret isolation, transaction boundaries, backups, human approvals, or application-specific allowlists. Keep those controls in place.
+
+## Public exports
 
 ```python
-ResumeScreeningResult(
-    *,
-    report: str | None,
-    governance_error: str | None,
-    requires_human_review: bool = True,
-    policy_id: str = EU_AI_ACT_PROXY_BIAS_POLICY_ID,
+from ramen_foundry import (
+    DbShieldAgent,
+    DevboxShieldAgent,
+    EU_AI_ACT_PROXY_BIAS_POLICY_ID,
+    RamenGovernedNode,
+    RamenToolNode,
+    ResumeScreeningAgent,
+    ResumeScreeningRequest,
+    ResumeScreeningResult,
+    SHIELD_CORE_IT_BUNDLE_ID,
+    ScoutShieldAgent,
+    ToolInvocation,
 )
 ```
 
-A successful result has a report and no governance error. A blocked or failed result has no report and includes a safe error. `requires_human_review` defaults to `True` and does not itself pause execution.
+`ToolInvocation` contains a non-empty `name`, an `arguments` dictionary, and a non-empty `tool_call_id`. `RamenToolNode` and `RamenGovernedNode` accept explicit `policy_ids`, `bundle_ids`, or both; at least one scope is required.
 
-## Underlying SDK and HTTP API
+## Runtime dependencies
 
-Foundry is powered by the [`ramen-ai-core` Python SDK](https://github.com/ramen-ai-dev/ramen-ai-integrations/tree/master/core-clients/python). The default API base URL is `https://api.ramenai.dev`.
+| Package | Constraint |
+|---|---:|
+| Python | `>=3.10` |
+| `ramen-ai-core` | `>=0.3.2,<0.4.0` |
+| `langgraph` | `==1.2.11` |
+| `langchain-core` | `==1.6.0` |
+| `pydantic` | `==2.13.4` |
 
-| Foundry boundary | SDK method | HTTP endpoint |
-|---|---|---|
-| Tool pre-execution | `RamenClient.evaluate_compliance` | `POST /api/v1/paas/evaluate` |
-| Governed final content | `RamenClient.generate_governed` | `POST /api/v1/generate/governed` |
-
-### Authentication headers
-
-| Header | Purpose |
-|---|---|
-| `Authorization: Bearer <RAMEN_API_KEY>` | Authenticates the ramen-ai request. |
-| `X-Provider-Key: <provider key>` | Optional BYOK credential used for generation/evaluation compute. |
-| `X-Provider: <provider name>` | Optional provider route. |
-
-### Passive evaluation contract used by `RamenToolNode`
-
-The node sends `input`, `policy_ids` and/or `bundle_ids`, and `context={"tool_name": ...}`. The SDK verifies the returned V5 receipt signature and hash binding locally. Relevant result fields include `allowed`, `receipt_verified`, `receipt_valid`, `receipt_reason`, `receipt_alert`, `steering`, resolved `policy_ids`, and raw `data`.
-
-### Governed-generation contract used by `RamenGovernedNode`
-
-The node sends the prompt, policy/bundle scope, provider routing, and `max_retries=1`. The underlying SDK accepts non-blank prompts up to 10,000 characters and allows `max_retries` values of `0` or `1`. SDK-level generation options support temperatures from `0` through `2`, maximum-token values from `1` through `4096`, and optional healing-trail exposure; the current Foundry node does not expose those generation options.
-
-The Python SDK also offers streaming governed generation with `status`, `heartbeat`, and `complete` events. The current `RamenGovernedNode` intentionally calls only the non-streaming method.
-
-## Failure and security semantics
-
-- **Fail closed:** tool execution requires an affirmative policy verdict and a locally verified receipt.
-- **No blocked-content release:** governed denials write no generated content to the configured content key.
-- **Explicit scope:** both node constructors reject configurations without a policy or bundle.
-- **Explicit errors:** evaluation outages, unverified receipts, unknown tools, tool exceptions, governed denials, transport failures, and unexpected generation failures are represented explicitly.
-- **Structured governed failures:** policy exhaustion raises `GovernanceDeniedException`; other governed API, transport, or protocol failures raise `GovernedGenerationException` in the SDK and are converted to safe graph-state errors by the node.
-- **Credentials stay application-owned:** never hard-code API or provider keys; load them from your secret manager or environment.
-
-## Package status
-
-- Current version: `0.1.0`
-- Package type: synchronous Python library
-- Build backend: Hatchling
-- No CLI, server, deployment manifest, or bundled provider-specific chat adapter
-- License: MIT, as declared in `pyproject.toml`
-
-## Ecosystem
+## Resources
 
 - [ramen-ai platform](https://ramenai.dev)
-- [ramen-ai integrations and SDKs](https://github.com/ramen-ai-dev/ramen-ai-integrations)
-- [Python core SDK](https://github.com/ramen-ai-dev/ramen-ai-integrations/tree/master/core-clients/python)
 - [Plans and API keys](https://ramenai.dev/pricing)
+- [Machine-readable architecture and integration context](https://ramenai.dev/llms.txt)
+- [Python SDK and integrations](https://github.com/ramen-ai-dev/ramen-ai-integrations)
+- [ramen-foundry source](https://github.com/ramen-ai-dev/ramen-foundry)
+
+## License
+
+MIT, as declared in `pyproject.toml`.

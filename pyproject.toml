@@ -4,16 +4,22 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ramen-foundry"
-version = "0.1.0"
+version = "0.1.1"
 description = "LangGraph governance nodes and human-review workflow templates powered by ramen-ai."
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
-    "ramen-ai-core==0.3.2",
+    "ramen-ai-core>=0.3.2,<0.4.0",
     "langgraph==1.2.11",
     "langchain-core==1.6.0",
     "pydantic==2.13.4",
 ]
+
+[project.urls]
+Homepage = "https://ramenai.dev"
+Documentation = "https://ramenai.dev/llms.txt"
+Repository = "https://github.com/ramen-ai-dev/ramen-foundry"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ramen_foundry"]
