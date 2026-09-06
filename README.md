@@ -59,25 +59,7 @@ command = agent.execute(ToolInvocation(name="inspect_directory", arguments={"pat
 
 ## Core engine architecture
 
-```mermaid
-sequenceDiagram
-    participant A as Agent / LangGraph
-    participant T as RamenToolNode
-    participant R as ramen-ai L2 boundary
-    participant C as Host capability
-
-    A->>T: Resolved ToolInvocation
-    T->>T: Canonicalize tool + arguments
-    T->>R: Stateless semantic evaluation
-    R-->>T: Verdict + Ed25519 receipt
-    T->>T: Verify signature and input binding
-    alt allowed and receipt_verified
-        T->>C: Execute registered BaseTool
-        C-->>A: ToolMessage + Command
-    else denied, unavailable, or unverifiable
-        T-->>A: Error ToolMessage; capability not executed
-    end
-```
+![Core engine architecture: RamenToolNode evaluates and verifies each resolved action before a host capability can execute.](https://raw.githubusercontent.com/ramen-ai-dev/ramen-foundry/master/assets/core-engine-architecture.svg)
 
 ### `RamenToolNode`: pre-execution interception
 
@@ -94,15 +76,7 @@ Pre-execution failures—evaluation errors, blocked verdicts, missing or invalid
 
 ### `RamenGovernedNode`: self-correcting generation
 
-```mermaid
-flowchart LR
-    P[Prompt] --> G[ramen-ai governed generation]
-    G --> M[Provider model]
-    M --> E[Semantic evaluation]
-    E -->|Needs healing| G
-    E -->|Allowed| V[Verified released content]
-    E -->|Retry exhausted| B[Blocked; no content released]
-```
+![Governed generation architecture: content loops through semantic evaluation and one healing retry before verified release or blocking.](https://raw.githubusercontent.com/ramen-ai-dev/ramen-foundry/master/assets/governed-generation-architecture.svg)
 
 `RamenGovernedNode` sends a prompt through the active governed-generation cascade. ramen-ai manages the provider call, semantic evaluation, and one healing retry. Only approved final content is written to graph state. Denials and transport/protocol failures produce `governed_content=None` and an explicit `governance_error`; blocked drafts are never released.
 
