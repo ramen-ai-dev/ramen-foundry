@@ -3,6 +3,7 @@
 from ._security import SHIELD_CORE_IT_BUNDLE_ID
 from .db_shield import DbShieldAgent
 from .devbox_shield import DevboxShieldAgent
+from .fintech import CommercialLendingAgent
 from .hrtech import (
     EU_AI_ACT_PROXY_BIAS_POLICY_ID,
     ResumeScreeningAgent,
@@ -12,6 +13,7 @@ from .hrtech import (
 from .scout_shield import ScoutShieldAgent
 
 __all__ = [
+    "CommercialLendingAgent",
     "DbShieldAgent",
     "DevboxShieldAgent",
     "EU_AI_ACT_PROXY_BIAS_POLICY_ID",

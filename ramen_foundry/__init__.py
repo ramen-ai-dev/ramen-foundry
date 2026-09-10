@@ -2,6 +2,7 @@
 
 from .core import RamenGovernedNode, RamenToolNode, ToolInvocation
 from .templates import (
+    CommercialLendingAgent,
     DbShieldAgent,
     DevboxShieldAgent,
     EU_AI_ACT_PROXY_BIAS_POLICY_ID,
@@ -13,6 +14,7 @@ from .templates import (
 )
 
 __all__ = [
+    "CommercialLendingAgent",
     "DbShieldAgent",
     "DevboxShieldAgent",
     "EU_AI_ACT_PROXY_BIAS_POLICY_ID",
@@ -26,4 +28,4 @@ __all__ = [
     "ToolInvocation",
 ]
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

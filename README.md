@@ -87,11 +87,35 @@ The Foundry node is synchronous and non-streaming. The underlying `ramen-ai-core
 | Template | Public class | Bound policy scope | Consequential capabilities |
 |---|---|---|---|
 | `hrtech` | `ResumeScreeningAgent` | EU AI Act Annex III Proxy Bias Interceptor (`0d5ed2af-5e98-4a8c-92c3-dea26c07bf9a`) | Governed evidence-focused report; mandatory human review |
+| `fintech` | `CommercialLendingAgent` | `ramen__fintech_banking_invariance`: adverse action (`796b7a87-d1f5-4ecc-91f2-a506a9b0d91e`) and wire dual control (`b4c18ba1-26b7-4b7f-b44b-65e8de790572`) | Credit adverse-action notices and commercial-loan wire disbursement |
 | `devbox-shield` | `DevboxShieldAgent` | `ramen__shield_core_it`: Destructive Execution, Infrastructure Abuse, Secret Exfiltration | Directory inspection, path deletion, process termination |
 | `db-shield` | `DbShieldAgent` | `ramen__shield_core_it`: Destructive Execution and Infrastructure Abuse | Query/plan inspection, deadlock diagnosis, backend termination |
 | `scout-shield` | `ScoutShieldAgent` | `ramen__shield_core_it`: OWASP ASI06 Indirect Prompt Injection and Secret Exfiltration | URL retrieval, extraction, approved local reads, publication |
 
-`ramen__shield_core_it` is an immutable production bundle slug. The backend resolves it to the currently active policy UUIDs at request time; the signed receipt records the exact resolved UUIDs that ran. This lets policy implementations evolve without requiring client releases.
+`ramen__shield_core_it` and `ramen__fintech_banking_invariance` are immutable production bundle slugs. The backend resolves each bundle to its currently active policy UUIDs at request time; the signed receipt records the exact resolved UUIDs that ran. This lets policy implementations evolve without requiring client releases.
+
+### fintech commercial lending
+
+`CommercialLendingAgent` governs a commercial-credit lifecycle against `ramen__fintech_banking_invariance`. The adverse-action control is anchored in ECOA Regulation B, CFPB Circular 2023-03, and FCRA § 615. The disbursement control enforces UCC § 4A-202 commercially reasonable security and dual control together with FinCEN Travel Rule evidence. These controls support a compliance program but do not replace counsel, bank procedures, sanctions screening, or authorized human approval.
+
+| Tool | Required evidence parameters |
+|---|---|
+| `issue_credit_adverse_action` | `application_id`, `decision`, `reg_b_reason_codes`, `model_hash`, `shap_attribution_summary` |
+| `dispatch_wire` | `account_id`, `amount_usd`, `beneficiary_name`, `beneficiary_routing`, `beneficiary_account`, `sanction_clearance_token`, `gl_offset`, `co_signer_public_key`, `co_signer_signature` |
+
+Reason codes must be attributable to the identified underwriting model's negative feature evidence; unsupported or conversational reasons are blocked. High-value wires must carry machine-verifiable sanctions clearance and Ed25519 co-signer evidence rather than a conversational assertion. The host owns token issuance, key custody, signature creation, ledger authorization, and tool implementation; Foundry passes the explicit evidence unchanged through `RamenToolNode` for signed policy evaluation.
+
+Five-line underwriter quickstart (the tool implementations are host-supplied LangChain `BaseTool` instances):
+
+```python
+from os import environ
+from ramen_ai import RamenClient
+from ramen_foundry import CommercialLendingAgent
+agent = CommercialLendingAgent(client=RamenClient(environ["RAMEN_API_KEY"]), tools={"issue_credit_adverse_action": issue_credit_adverse_action, "dispatch_wire": dispatch_wire})
+adverse_action, disbursement = agent.execute("issue_credit_adverse_action", rejection_evidence), agent.execute("dispatch_wire", signed_wire_evidence)
+```
+
+Use `agent.execute(tool_name, payload)` for a resolved direct action. Use `agent.invoke({"tool_invocation": invocation, "messages": []})` or compose `agent.graph` when the action is routed through the compiled LangGraph workflow. BYOK callers pass `provider_key` and `provider_name` together; enterprise managed-provider callers omit both.
 
 ### hrtech
 
