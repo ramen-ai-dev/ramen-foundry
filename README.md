@@ -82,6 +82,14 @@ Pre-execution failures—evaluation errors, blocked verdicts, missing or invalid
 
 The Foundry node is synchronous and non-streaming. The underlying `ramen-ai-core` SDK also exposes streaming governed generation for applications that need progress events.
 
+## Operational Scope & Boundary Demarcation
+
+**The ingestion invariant.** ramen-foundry templates govern resolved tool-execution payloads at the graph's pre-execution boundary (`tools/pre-execute`). The L2 gate evaluates the proposed capability name and its explicit arguments against the bound policy or bundle, requires a locally verified receipt, and only then releases the registered host tool. It enforces invariant decision contracts on the payload presented to that boundary; it does not reconstruct facts that are absent from the payload.
+
+**Upstream demarcation.** ramen-foundry does not parse raw credit-bureau files, perform raw-document OCR, clean source records, impute missing values, engineer model features, train underwriting models, or calculate SHAP values. The upstream application owns data licensing and provenance, extraction, normalization, missing-value treatment, feature engineering, model validation, protected-attribute controls, attribution-method selection, and the production mapping from model features to approved adverse-action reason codes. Foundry and ramen-ai do not make dirty or unsupported source evidence valid merely because it is submitted to a governed tool.
+
+**Schema compliance.** The typed fields declared by each template are a caller contract, not an ingestion or coercion service. Callers must resolve safety-significant evidence into those fields before invoking the graph. The outer `ToolInvocation`, the bound semantic policy, local receipt verification, and the host tool's own argument schema form the combined pre-execution boundary: malformed dictionaries, omitted evidence, contradictory attribution, and unmapped free-form text must not be released as a successful tool execution and fail closed by design. Hosts must retain strict `BaseTool` schemas because Foundry does not transform dirty input into a valid typed payload.
+
 ## Template catalogue
 
 | Template | Public class | Bound policy scope | Consequential capabilities |
@@ -116,6 +124,23 @@ adverse_action, disbursement = agent.execute("issue_credit_adverse_action", reje
 ```
 
 Use `agent.execute(tool_name, payload)` for a resolved direct action. Use `agent.invoke({"tool_invocation": invocation, "messages": []})` or compose `agent.graph` when the action is routed through the compiled LangGraph workflow. BYOK callers pass `provider_key` and `provider_name` together; enterprise managed-provider callers omit both.
+
+#### Empirical German Credit benchmark
+
+`examples/benchmark_credit_data.py` demonstrates the full responsibility boundary with the public UCI German Credit dataset exposed by OpenML as `credit-g` version 1. It performs all upstream work in the example application: protected/proxy feature exclusion, deterministic missing-value handling and one-hot encoding, XGBoost default-risk training, held-out metrics, real `shap.TreeExplainer` attribution, and an explicit source-feature-to-Regulation-B reason-code map. It then submits one grounded and one hallucinated adverse action through `CommercialLendingAgent`, requiring locally verified V5 Ed25519 receipts for both the live `[ALLOWED]` and `[BLOCKED]` outcomes.
+
+The dataset is consumer-credit data and the mapping is illustrative; neither is a production commercial-underwriting model, validated adverse-action notice system, or legal conclusion. Institutions must substitute their approved data dictionary, model, attribution method, and principal-reason mapping. The script downloads public data and makes two live ramen-ai evaluations.
+
+From a source checkout (the `examples/` directory is not installed by the wheel):
+
+```bash
+git clone https://github.com/ramen-ai-dev/ramen-foundry.git
+cd ramen-foundry
+python3 -m pip install -e '.[credit-benchmark]'
+export RAMEN_API_KEY="your-ramen-api-key"
+export OPENAI_API_KEY="your-provider-api-key"  # optional for enterprise managed mode
+python3 examples/benchmark_credit_data.py
+```
 
 ### hrtech
 
