@@ -90,6 +90,20 @@ The Foundry node is synchronous and non-streaming. The underlying `ramen-ai-core
 
 **Schema compliance.** The typed fields declared by each template are a caller contract, not an ingestion or coercion service. Callers must resolve safety-significant evidence into those fields before invoking the graph. The outer `ToolInvocation`, the bound semantic policy, local receipt verification, and the host tool's own argument schema form the combined pre-execution boundary: malformed dictionaries, omitted evidence, contradictory attribution, and unmapped free-form text must not be released as a successful tool execution and fail closed by design. Hosts must retain strict `BaseTool` schemas because Foundry does not transform dirty input into a valid typed payload.
 
+### Empirical Verification: Real-World Credit Benchmark
+
+The checked `examples/benchmark_credit_data.py` execution exercised the complete upstream-model-to-governed-tool boundary against production policies:
+
+| Verification element | Empirical result |
+|---|---|
+| Dataset | OpenML `credit-g` v1: 1,000 rows, 20 features; SHA-256 `043dff5b02f794decc1540a561e63874e9a93717aa2e9d2b43ec56f3def7d68c` |
+| Risk model | Deterministic XGBoost classifier; accuracy `0.752`, ROC-AUC `0.791` |
+| Upstream TreeSHAP mapping | Principal adverse factors mapped to `INSUFFICIENT_LIQUIDITY`, `EXCESSIVE_REPAYMENT_TERM`, `INSUFFICIENT_EMPLOYMENT_HISTORY`, and `INSUFFICIENT_CASH_RESERVES` |
+| Scenario A — grounded adverse action | **[ALLOWED]** with a locally verified Ed25519 receipt |
+| Scenario B — hallucinated geographic factor | **[BLOCKED]** with a locally verified Ed25519 receipt and statutory steering |
+
+This verifies the dual boundary on an authentic public credit distribution: grounded, model-attributable reasons can cross the execution boundary, while a reason that contradicts the SHAP evidence and introduces an unmapped geographic proxy fails closed. The benchmark remains an engineering verification, not a validated underwriting model or legal certification.
+
 ## Template catalogue
 
 | Template | Public class | Bound policy scope | Consequential capabilities |
