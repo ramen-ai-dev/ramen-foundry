@@ -22,6 +22,8 @@
 Use the low-level nodes to govern an existing graph, or start with a domain template:
 
 - **hrtech** — evidence-focused resume review for a human decision-maker.
+- **fintech** — commercial-credit adverse actions and dual-controlled wire disbursement.
+- **industrial-automation** — governed PLC setpoints and operator-controlled SIS maintenance.
 - **devbox-shield** — workstation inspection, cleanup, and process control.
 - **db-shield** — database triage, query inspection, and deadlock diagnosis.
 - **scout-shield** — injection-resistant web research and publication.
@@ -110,11 +112,12 @@ This verifies the dual boundary on an authentic public credit distribution: grou
 |---|---|---|---|
 | `hrtech` | `ResumeScreeningAgent` | EU AI Act Annex III Proxy Bias Interceptor (`0d5ed2af-5e98-4a8c-92c3-dea26c07bf9a`) | Governed evidence-focused report; mandatory human review |
 | `fintech` | `CommercialLendingAgent` | `ramen__fintech_banking_invariance`: adverse action (`796b7a87-d1f5-4ecc-91f2-a506a9b0d91e`) and wire dual control (`b4c18ba1-26b7-4b7f-b44b-65e8de790572`) | Credit adverse-action notices and commercial-loan wire disbursement |
+| `industrial-automation` | `IndustrialAutomationAgent` | `ramen__industrial_iot_actuation_invariance`: telemetry degradation, safety envelope/slew rate, and SIS isolation/interlocks | PLC setpoint trajectories and controlled SIS maintenance mutations |
 | `devbox-shield` | `DevboxShieldAgent` | `ramen__shield_core_it`: Destructive Execution, Infrastructure Abuse, Secret Exfiltration | Directory inspection, path deletion, process termination |
 | `db-shield` | `DbShieldAgent` | `ramen__shield_core_it`: Destructive Execution and Infrastructure Abuse | Query/plan inspection, deadlock diagnosis, backend termination |
 | `scout-shield` | `ScoutShieldAgent` | `ramen__shield_core_it`: OWASP ASI06 Indirect Prompt Injection and Secret Exfiltration | URL retrieval, extraction, approved local reads, publication |
 
-`ramen__shield_core_it` and `ramen__fintech_banking_invariance` are immutable production bundle slugs. The backend resolves each bundle to its currently active policy UUIDs at request time; the signed receipt records the exact resolved UUIDs that ran. This lets policy implementations evolve without requiring client releases.
+`ramen__shield_core_it`, `ramen__fintech_banking_invariance`, and `ramen__industrial_iot_actuation_invariance` are immutable production bundle slugs. The backend resolves each bundle to its currently active policy UUIDs at request time; the signed receipt records the exact resolved UUIDs that ran. This lets policy implementations evolve without requiring client releases.
 
 ### fintech commercial lending
 
@@ -155,6 +158,37 @@ export RAMEN_API_KEY="your-ramen-api-key"
 export OPENAI_API_KEY="your-provider-api-key"  # optional for enterprise managed mode
 python3 examples/benchmark_credit_data.py
 ```
+
+### industrial automation
+
+`IndustrialAutomationAgent` intercepts resolved PLC and SIS actions before host dispatch and binds every request to `ramen__industrial_iot_actuation_invariance`. The production bundle resolves to three coordinated controls:
+
+| Governing policy | Policy ID | Enforced boundary |
+|---|---|---|
+| Sensor Telemetry Degradation & Physical Invariance | `5ae51a4f-46b8-4015-bee7-2c6cc9499561` | Fails closed when materially degraded physical-source telemetry lacks healthy, time-aligned, independent corroboration. |
+| Safety Envelope & Slew Rate Invariance | `6f2fd94c-d2f0-4c91-b5bc-267b2dd067d1` | Requires represented certified bounds and maximum slew; for a nonzero move, `abs(target_val - current_val) / ramp_rate_sec` must not exceed the applicable engineering-units-per-second limit. |
+| Safety Instrumented System (SIS) Isolation & Interlock Invariance | `ca426a09-9484-487f-8e98-346218bfcefa` | Denies autonomous safety-function writes and requires represented target-local physical-key, active MOC, and finite maintenance-window evidence for operator-controlled maintenance. |
+
+| Tool | Required baseline payload fields |
+|---|---|
+| `adjust_plc_setpoint` | `node_id`, `tag`, `target_val`, `current_val`, `ramp_rate_sec`, `engineering_units`, `asset_criticality`, `operating_envelope_id` |
+| `mutate_safety_parameter` | `node_id`, `tag`, `mutation_type`, `requested_value`, `duration_sec`, `physical_key_interlock_verified`, `management_of_change_id` |
+
+A consequential nonzero setpoint change with `ramp_rate_sec <= 0` is blocked rather than divided through. Target bounds are inclusive under the active policy, and represented engineering units, envelope applicability, current telemetry, maximum slew, and relevant transient/history evidence must agree. Certified SIS and E-stop registers have zero autonomous-software-override authority: a physical-key Boolean or MOC identifier alone does not prove target-local engagement, active authorization, or technician-only execution.
+
+Five-line supervisory-loop quickstart (the host supplies the strict LangChain `BaseTool` and resolved evidence payload):
+
+```python
+from os import environ
+from ramen_ai import RamenClient
+from ramen_foundry import IndustrialAutomationAgent
+agent = IndustrialAutomationAgent(client=RamenClient(environ["RAMEN_API_KEY"]), tools={"adjust_plc_setpoint": adjust_plc_setpoint})
+command = agent.execute("adjust_plc_setpoint", supervisory_command)
+```
+
+Use `agent.execute(tool_name, payload)` for direct evaluation or `agent.invoke({"tool_invocation": invocation, "messages": []})`/`agent.graph` for compiled LangGraph routing. Pass `provider_key` and `provider_name` together for BYOK; omit both for enterprise managed-provider mode.
+
+The policy evaluates represented evidence; Foundry does not query PLC/SIS hardware, certify operating envelopes, authenticate physical keys, validate MOC registries, or replace BPCS/SIF interlocks. Host tools must independently enforce local interlocks, least privilege, stale-telemetry rejection, network segmentation, human/physical authorization, operation IDs, and rollback-safe procedures.
 
 ### hrtech
 
@@ -293,9 +327,12 @@ Semantic governance is not a replacement for OS permissions, sandboxing, read-on
 
 ```python
 from ramen_foundry import (
+    CommercialLendingAgent,
     DbShieldAgent,
     DevboxShieldAgent,
     EU_AI_ACT_PROXY_BIAS_POLICY_ID,
+    INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID,
+    IndustrialAutomationAgent,
     RamenGovernedNode,
     RamenToolNode,
     ResumeScreeningAgent,

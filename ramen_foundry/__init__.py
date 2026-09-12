@@ -6,6 +6,8 @@ from .templates import (
     DbShieldAgent,
     DevboxShieldAgent,
     EU_AI_ACT_PROXY_BIAS_POLICY_ID,
+    INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID,
+    IndustrialAutomationAgent,
     ResumeScreeningAgent,
     ResumeScreeningRequest,
     ResumeScreeningResult,
@@ -18,6 +20,8 @@ __all__ = [
     "DbShieldAgent",
     "DevboxShieldAgent",
     "EU_AI_ACT_PROXY_BIAS_POLICY_ID",
+    "INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID",
+    "IndustrialAutomationAgent",
     "RamenGovernedNode",
     "RamenToolNode",
     "ResumeScreeningAgent",
@@ -28,4 +32,4 @@ __all__ = [
     "ToolInvocation",
 ]
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"

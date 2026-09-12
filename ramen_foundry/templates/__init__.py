@@ -10,6 +10,10 @@ from .hrtech import (
     ResumeScreeningRequest,
     ResumeScreeningResult,
 )
+from .industrial_iot import (
+    INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID,
+    IndustrialAutomationAgent,
+)
 from .scout_shield import ScoutShieldAgent
 
 __all__ = [
@@ -17,6 +21,8 @@ __all__ = [
     "DbShieldAgent",
     "DevboxShieldAgent",
     "EU_AI_ACT_PROXY_BIAS_POLICY_ID",
+    "INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID",
+    "IndustrialAutomationAgent",
     "ResumeScreeningAgent",
     "ResumeScreeningRequest",
     "ResumeScreeningResult",
