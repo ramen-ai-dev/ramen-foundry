@@ -203,6 +203,21 @@ From a source checkout, provide `RAMEN_API_KEY` through the environment or a loc
 python3 examples/benchmark_asimov_robotics.py
 ```
 
+### Interactive 3D Physics Simulation (MuJoCo)
+
+`examples/simulate_robotics_3d.py` is a local-only visual workcell demonstration built with native MuJoCo and a self-contained 7-DOF Franka Emika Panda-form MJCF model. It never connects to robot hardware. Interactive execution launches the macOS viewer through `mujoco.viewer`; `--headless` and CI use native `mujoco.mj_step` stepping without opening a display.
+
+Install the optional pinned simulation dependency and launch the visual demonstration from a source checkout:
+
+```bash
+pip install "ramen-foundry[simulation]"
+python examples/simulate_robotics_3d.py
+```
+
+For a finite headless run, use `python examples/simulate_robotics_3d.py --headless`. The visual sequence is: Franka Panda arm joint-target interpolation → pre-execution policy evaluation through `IndustrialAutomationAgent` → mid-air kinetic arrest on a violation (`data.ctrl[:] = 0.0`, zero joint velocity, and a red hazard sphere) → Schema V5 Ed25519 receipt verification and steering output. The compliant ISO/TS 15066 component-transfer scene is released only after a verified `[ALLOWED]` outcome, then closes the local simulated gripper and completes its transfer.
+
+The hazardous NFPA 70E terminal-insertion scene targets the deployed Robotics Physical Safety & Biomechanical Invariance control (`1fc71052-eb7e-43fe-9bfa-7ee06afe5b95`) through `ramen__industrial_iot_actuation_invariance`. As with every Foundry template, the bundle gate is authoritative; MuJoCo is only the host-side visual artifact.
+
 ### hrtech
 
 `ResumeScreeningAgent` compiles:
