@@ -28,9 +28,6 @@ from ramen_foundry import IndustrialAutomationAgent
 API_BASE_URL = "https://api.ramenai.dev"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_ENV_PATH = PROJECT_ROOT / ".env"
-INTEGRATIONS_ENV_PATH = Path(
-    "/Users/damian/Developer/ramen-ai/ramen-ai-integrations/.env"
-)
 ManipulationAction = Literal[
     "PICK_AND_PLACE", "INSERT_TOOL", "APPLY_FORCE", "POUR_LIQUID", "WIPE_SURFACE"
 ]
@@ -93,20 +90,25 @@ def _parse_dotenv(path: Path) -> dict[str, str]:
 def load_environment_credentials(
     *,
     local_env_path: Path = LOCAL_ENV_PATH,
-    integrations_env_path: Path = INTEGRATIONS_ENV_PATH,
+    shared_env_path: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Load local credentials, falling back to the integrations checkout .env.
+    """Load local credentials and an explicitly configured shared dotenv file.
 
-    Explicit process environment values always win over values read from either
-    file, so CI and secret managers remain authoritative.
+    When the local dotenv is absent or empty, ``RAMEN_ENV_FILE`` can point to a
+    portable shared dotenv file. Explicit process environment values always win
+    over file values, so CI and secret managers remain authoritative.
     """
 
+    process_environment = dict(os.environ if environ is None else environ)
+    configured_path = shared_env_path
+    if configured_path is None and process_environment.get("RAMEN_ENV_FILE"):
+        configured_path = Path(process_environment["RAMEN_ENV_FILE"]).expanduser()
     loaded = _parse_dotenv(local_env_path) if local_env_path.is_file() else {}
-    if not loaded and integrations_env_path.is_file():
-        loaded = _parse_dotenv(integrations_env_path)
+    if not loaded and configured_path is not None and configured_path.is_file():
+        loaded = _parse_dotenv(configured_path)
     resolved = dict(loaded)
-    resolved.update(dict(os.environ if environ is None else environ))
+    resolved.update(process_environment)
     return resolved
 
 

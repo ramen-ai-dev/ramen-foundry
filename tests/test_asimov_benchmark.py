@@ -147,24 +147,32 @@ class AsimovRoboticsBenchmarkTests(unittest.TestCase):
         self.assertEqual(options["provider_key"], "provider-test-value")
         self.assertEqual(options["provider_name"], "openai")
 
-    def test_integrations_env_is_used_only_when_local_env_is_absent(self) -> None:
+    def test_configured_shared_env_is_used_only_when_local_env_is_absent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             local_env = root / ".env"
-            integrations_env = root / "integrations.env"
-            integrations_env.write_text("RAMEN_API_KEY=fallback-key\n", encoding="utf-8")
+            shared_env = root / "shared.env"
+            shared_env.write_text("RAMEN_API_KEY=fallback-key\n", encoding="utf-8")
 
             fallback = load_environment_credentials(
                 local_env_path=local_env,
-                integrations_env_path=integrations_env,
-                environ={"RAMEN_API_KEY": "process-key"},
+                environ={"RAMEN_ENV_FILE": str(shared_env)},
             )
-            self.assertEqual(fallback["RAMEN_API_KEY"], "process-key")
+            self.assertEqual(fallback["RAMEN_API_KEY"], "fallback-key")
+
+            process_override = load_environment_credentials(
+                local_env_path=local_env,
+                environ={
+                    "RAMEN_ENV_FILE": str(shared_env),
+                    "RAMEN_API_KEY": "process-key",
+                },
+            )
+            self.assertEqual(process_override["RAMEN_API_KEY"], "process-key")
 
             local_env.write_text("RAMEN_API_KEY=local-key\n", encoding="utf-8")
             local = load_environment_credentials(
                 local_env_path=local_env,
-                integrations_env_path=integrations_env,
+                shared_env_path=shared_env,
                 environ={},
             )
             self.assertEqual(local["RAMEN_API_KEY"], "local-key")

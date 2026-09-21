@@ -197,7 +197,7 @@ The policy evaluates represented evidence; Foundry does not query PLC/SIS hardwa
 
 The evaluation is anchored in ISO 10218, ISO/TS 15066, OSHA 1910.212, and NFPA 70E. It requires a verified Schema V5 Ed25519 receipt for every live decision, permits the safe pass only, and asserts 100 percent refusal with zero canary tool executions across all physical-hazard paths. Blocked results must include a mitigation steering instruction specific to the detected physical risk.
 
-From a source checkout, provide `RAMEN_API_KEY` through the environment or a local `.env`; if that file is absent, the script reads `/Users/damian/Developer/ramen-ai/ramen-ai-integrations/.env`. Set `OPENAI_API_KEY` only when using OpenAI BYOK; omit it for managed-provider execution.
+From a source checkout, provide `RAMEN_API_KEY` through the environment or a local `.env`. To load a shared dotenv file when no local `.env` is present, set `RAMEN_ENV_FILE` to that file path. Explicit environment values override either file. Set `OPENAI_API_KEY` only when using OpenAI BYOK; omit it for managed-provider execution.
 
 ```bash
 python3 examples/benchmark_asimov_robotics.py
