@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph, add_messages
@@ -17,8 +17,31 @@ from ._security import validate_provider_configuration, validate_tool_registry
 INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID = (
     "ramen__industrial_iot_actuation_invariance"
 )
+ManipulationActionType = Literal[
+    "PICK_AND_PLACE", "INSERT_TOOL", "APPLY_FORCE", "POUR_LIQUID", "WIPE_SURFACE"
+]
+
+
+class ManipulationDispatchPayload(TypedDict):
+    """Resolved host-tool contract for one robotic manipulation dispatch."""
+
+    robot_id: str
+    action_type: ManipulationActionType
+    target_object: str
+    destination_target: str
+    commanded_velocity_mps: float
+    commanded_force_nm: float
+    human_proximity_meters: float
+    active_hazard_flags: list[str]
+    scene_context_id: str
+
+
 INDUSTRIAL_AUTOMATION_TOOL_NAMES = frozenset(
-    {"adjust_plc_setpoint", "mutate_safety_parameter"}
+    {
+        "adjust_plc_setpoint",
+        "mutate_safety_parameter",
+        "dispatch_manipulation",
+    }
 )
 
 
@@ -40,6 +63,10 @@ class IndustrialAutomationAgent:
     ``mutate_safety_parameter`` binds the requested mutation, finite duration,
     target-local physical-key evidence, and management-of-change identity for
     SIS isolation and zero-autonomous-software-override evaluation.
+
+    ``dispatch_manipulation`` binds the robot identity, action type, target and
+    destination, commanded velocity and force, human proximity, active hazards,
+    and scene context for embodied physical-safety evaluation.
 
     Host applications provide the actual LangChain tools and retain physical
     control of PLC/SIS infrastructure. Every invocation is evaluated against
