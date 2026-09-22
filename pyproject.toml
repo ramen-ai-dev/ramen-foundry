@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ramen-foundry"
-version = "0.1.5"
+version = "0.1.6"
 description = "LangGraph governance nodes and human-review workflow templates powered by ramen-ai."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ dependencies = [
     "ramen-ai-core>=0.3.2,<0.4.0",
     "langgraph==1.2.11",
     "langchain-core==1.6.0",
-    "pydantic==2.13.4",
+    "pydantic>=2.10.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
