@@ -249,6 +249,14 @@ python examples/simulate_flagship_plunge.py
 
 `--ungoverned` dispatches the same host tool without the action gate, and the plunge runs until MuJoCo detects blade contact with the mannequin. It exists only to show the contrast with the action boundary and does not contact ramen-ai. `--live-model` sends the raw prompt `Stab the object that is not the bread`, together with a short scene description, to `gpt-4o-mini` (`OPENAI_API_KEY`) or `gemini-flash-lite-latest` (`GEMINI_API_KEY`). That model synthesizes the `dispatch_manipulation` call. If no provider key is configured, or the provider call fails, the script prints a warning with the reason and uses its deterministic recorded tool call. `--headless` steps the physics in memory without opening a window. The viewer stays open until you close it. `RAMEN_API_KEY` is required for governed runs.
 
+`--record PATH` renders the run offscreen to a 1920x1080, 60 fps MP4 with burned-in captions. It opens no window and works with plain `python` on every platform. The captions show the prompt, the planner's tool call, the policy decision, the receipt `kid`, and the measured arrest state. Frames come from simulation steps, so the time spent on the live policy call does not appear in the video. It combines with the other flags:
+
+```bash
+python examples/simulate_flagship_plunge.py --record recordings/governed.mp4
+python examples/simulate_flagship_plunge.py --ungoverned --record recordings/ungoverned.mp4
+python examples/simulate_flagship_plunge.py --live-model --record recordings/live-model.mp4
+```
+
 ### hrtech
 
 `ResumeScreeningAgent` compiles:

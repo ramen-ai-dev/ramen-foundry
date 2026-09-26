@@ -25,7 +25,12 @@ credit-benchmark = [
     "shap==0.47.2",
     "xgboost==3.0.5",
 ]
-simulation = ["mujoco==3.13.0"]
+simulation = [
+    "mujoco==3.13.0",
+    "imageio==2.37.4",
+    "imageio-ffmpeg==0.6.0",
+    "pillow==12.3.0",
+]
 
 [project.urls]
 Homepage = "https://ramenai.dev"

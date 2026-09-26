@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import base64
 import json
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
 import httpx
+import imageio.v2 as imageio
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ramen_ai.verifier import sha256_hex, verify_receipt
@@ -19,6 +22,7 @@ from examples.simulate_flagship_plunge import (
     KINETIC_ARREST_DISTANCE_M,
     PRODUCTION_RECEIPT_KID,
     FlagshipMujocoWorkcell,
+    FlagshipRecorder,
     plan_dispatch,
     provider_options_from_environment,
     recorded_dispatch_plan,
@@ -115,6 +119,35 @@ class FlagshipPlungeSimulationTests(unittest.TestCase):
         self.assertEqual(options, {})
         self.assertIsNone(client.calls[-1]["provider_key"])
         self.assertIsNone(client.calls[-1]["provider_name"])
+
+    def test_recording_writes_captioned_mp4_for_both_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for governed, final_caption in ((True, "Kinetic arrest"), (False, "[DISPATCHED]")):
+                path = Path(directory) / f"flagship-{governed}.mp4"
+                with FlagshipRecorder(
+                    self.workcell, path, width=320, height=180, fps=10, frame_stride=6, hold_scale=0.1
+                ) as recorder:
+                    outcome = run_flagship_scene(
+                        self.workcell,
+                        FlagshipPolicyFakeClient() if governed else None,
+                        governed=governed,
+                        viewer=recorder,
+                        **FAST_STEPS,
+                    )
+
+                reader = imageio.get_reader(str(path))
+                try:
+                    self.assertEqual(reader.count_frames(), recorder.frames_written)
+                    self.assertEqual(reader.get_meta_data()["size"], (320, 180))
+                finally:
+                    reader.close()
+                self.assertTrue(recorder.captions[-1].startswith(final_caption))
+                self.assertEqual(outcome.host_canary_executions, 0 if governed else 1)
+
+    def test_recorder_rejects_odd_video_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                FlagshipRecorder(self.workcell, Path(directory) / "odd.mp4", width=321, height=180)
 
     def test_live_model_without_keys_reports_fallback_reason(self) -> None:
         plan = plan_dispatch(live_model=True, environment={})
