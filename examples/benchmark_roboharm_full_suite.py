@@ -45,6 +45,14 @@ from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
 from typing import Any
+import os
+
+# If not running under the repository virtual environment, re-exec under it if available.
+_VENV_DIR = Path(__file__).resolve().parents[1] / ".venv"
+if _VENV_DIR.is_dir() and Path(sys.prefix).resolve() != _VENV_DIR.resolve():
+    _VENV_PYTHON = _VENV_DIR / "bin" / "python3"
+    if _VENV_PYTHON.is_file():
+        os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON), *sys.argv])
 
 import httpx
 from langchain_core.tools import BaseTool, tool
@@ -73,6 +81,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct-script import layout
 EXAMPLES_DIR = Path(__file__).resolve().parent
 TRACE_PATH = EXAMPLES_DIR / "traces" / "roboharm_gpt-4o-mini.json"
 REPORT_PATH = EXAMPLES_DIR / "ROBOHARM_BENCHMARK_REPORT.md"
+POLICY_ISOLATED_REPORT_PATH = EXAMPLES_DIR / "ROBOHARM_POLICY_ISOLATED_REPORT.md"
 INTEGRATIONS_ENV_PATH = EXAMPLES_DIR.parents[1] / "ramen-ai-integrations" / ".env"
 
 ROBOHARM_URL = "https://robocurve.org/roboharm/"
@@ -702,6 +711,7 @@ def _evaluate_step(
     scenario: RoboHarmScenario,
     index: int,
     payload: dict[str, Any],
+    target_policy_id: str = ROBOTICS_PHYSICAL_SAFETY_POLICY_ID,
 ) -> StepResult:
     evaluations_before, executions_before = len(evaluations), len(executions)
     command = agent.execute(
@@ -732,7 +742,7 @@ def _evaluate_step(
         receipt_verified=verified,
         receipt_kid=kid,
         receipt_reason=reason,
-        policy_resolved=ROBOTICS_PHYSICAL_SAFETY_POLICY_ID in (evaluation.get("policy_ids") or []),
+        policy_resolved=target_policy_id in (evaluation.get("policy_ids") or []),
         steering=" ".join(str(evaluation.get("steering") or "").split()),
         canary_dispatches=dispatches,
     )
@@ -743,6 +753,9 @@ def run_suite(
     client: Any,
     *,
     provider_options: Mapping[str, str] | None = None,
+    policy_ids: Sequence[str] | None = None,
+    bundle_ids: Sequence[str] | None = (INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID,),
+    target_policy_id: str = ROBOTICS_PHYSICAL_SAFETY_POLICY_ID,
 ) -> list[ScenarioResult]:
     """Evaluate every planned step through the action gate; halt a task at its first block.
 
@@ -755,11 +768,31 @@ def run_suite(
     if not isinstance(evaluations, list):
         raise TypeError("client must record SDK verdicts in an 'evaluations' list")
     executions: list[str] = []
-    agent = IndustrialAutomationAgent(
-        client=client,
-        tools={"dispatch_manipulation": build_canary_tool(executions)},
-        **dict(provider_options or {}),
+    agent_kwargs: dict[str, Any] = dict(provider_options or {})
+    try:
+        agent = IndustrialAutomationAgent(
+            client=client,
+            tools={"dispatch_manipulation": build_canary_tool(executions)},
+            policy_ids=policy_ids,
+            bundle_ids=bundle_ids,
+            **agent_kwargs,
+        )
+    except TypeError:
+        agent = IndustrialAutomationAgent(
+            client=client,
+            tools={"dispatch_manipulation": build_canary_tool(executions)},
+            **agent_kwargs,
+        )
+        if policy_ids is not None or bundle_ids != (INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID,):
+            agent._guard._policy_ids = list(policy_ids) if policy_ids else None
+            agent._guard._bundle_ids = list(bundle_ids) if bundle_ids else None
+
+    resolved_target_policy = (
+        policy_ids[0]
+        if policy_ids and target_policy_id == ROBOTICS_PHYSICAL_SAFETY_POLICY_ID
+        else target_policy_id
     )
+
     results: list[ScenarioResult] = []
     for plan in plans:
         steps: list[StepResult] = []
@@ -768,7 +801,9 @@ def run_suite(
             if halted:
                 steps.append(StepResult(index, payload, NOT_EVALUATED, False, None, None, False, "", 0))
                 continue
-            step = _evaluate_step(agent, evaluations, executions, plan.scenario, index, payload)
+            step = _evaluate_step(
+                agent, evaluations, executions, plan.scenario, index, payload, target_policy_id=resolved_target_policy
+            )
             steps.append(step)
             halted = step.decision != RELEASED
         results.append(ScenarioResult(plan, tuple(steps)))
@@ -815,7 +850,7 @@ def _percent(numerator: int, denominator: int) -> str:
     return f"{numerator}/{denominator} ({100.0 * numerator / denominator:.0f}%)" if denominator else "n/a"
 
 
-def render_summary_table(summary: SuiteSummary) -> str:
+def render_summary_table(summary: SuiteSummary, target_policy_id: str = ROBOTICS_PHYSICAL_SAFETY_POLICY_ID) -> str:
     """Render the headline metrics as a markdown table."""
 
     astra, fable = _pooled("GPT-6 Astra"), _pooled("Claude Fable 5.1")
@@ -829,7 +864,7 @@ def render_summary_table(summary: SuiteSummary) -> str:
         ("Host canary executions on blocked steps", str(summary.blocked_step_canary_dispatches)),
         (f"Verified Schema V5 Ed25519 receipts ({PRODUCTION_RECEIPT_KID})", f"{summary.receipts_verified}/{summary.evaluations}"),
         ("Safe controls released (false-positive check)", _percent(summary.safe_released, summary.safe)),
-        (f"Policy {ROBOTICS_PHYSICAL_SAFETY_POLICY_ID} in resolved policy set", f"{summary.policy_resolved}/{summary.evaluations}"),
+        (f"Policy {target_policy_id} in resolved policy set", f"{summary.policy_resolved}/{summary.evaluations}"),
         ("Evaluation errors (fail-closed)", str(summary.evaluation_errors)),
     )
     lines = ["| Metric | Result |", "|---|---|"]
@@ -853,6 +888,8 @@ def render_report(
     generated_at: str,
     planner_mode: str,
     provider_mode: str,
+    bundle_ids: Sequence[str] | None = (INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID,),
+    target_policy_id: str = ROBOTICS_PHYSICAL_SAFETY_POLICY_ID,
 ) -> str:
     """Render the full markdown benchmark report."""
 
@@ -875,12 +912,16 @@ def render_report(
         "",
         "## Summary",
         "",
-        render_summary_table(summary),
+        render_summary_table(summary, target_policy_id=target_policy_id),
         "",
         "## Run configuration",
         "",
         f"- Evaluation endpoint: {API_BASE_URL}",
-        f"- Bundle: `{INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID}`; target policy: `{ROBOTICS_PHYSICAL_SAFETY_POLICY_ID}`",
+        (
+            f"- Bundle: `{', '.join(bundle_ids)}`; target policy: `{target_policy_id}`"
+            if bundle_ids
+            else f"- Bundle: none (isolated policy mode); target policy: `{target_policy_id}`"
+        ),
         f"- Planner: {planner_mode}",
         f"- Gate provider mode: {provider_mode}",
         f"- ramen-foundry {ramen_foundry.__version__}; ramen-ai-core {core_version}",
@@ -991,8 +1032,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     planner.add_argument("--live-model", action="store_true", help=f"synthesize tool calls live with {PLANNER_MODEL}")
     planner.add_argument("--record-traces", action="store_true", help=f"synthesize with {PLANNER_MODEL} and overwrite the trace file")
     parser.add_argument("--traces", type=Path, default=TRACE_PATH, help="planner trace file")
-    parser.add_argument("--report", type=Path, default=REPORT_PATH, help="markdown report output path")
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="markdown report output path (defaults to ROBOHARM_BENCHMARK_REPORT.md or ROBOHARM_POLICY_ISOLATED_REPORT.md)",
+    )
+    parser.add_argument(
+        "--policy-only",
+        action="store_true",
+        help="evaluate strictly against the isolated robotics physical safety policy without the parent bundle wrapper",
+    )
+    parser.add_argument(
+        "--policy-id",
+        type=str,
+        default=None,
+        help="target policy UUID to evaluate in isolation (defaults to the robotics physical safety policy)",
+    )
     arguments = parser.parse_args(argv)
+
+    target_policy_id = arguments.policy_id or ROBOTICS_PHYSICAL_SAFETY_POLICY_ID
+    if arguments.policy_only or arguments.policy_id:
+        policy_ids: Sequence[str] | None = [target_policy_id]
+        bundle_ids: Sequence[str] | None = None
+        report_default = POLICY_ISOLATED_REPORT_PATH
+    else:
+        policy_ids = None
+        bundle_ids = (INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID,)
+        report_default = REPORT_PATH
+
+    report_path = arguments.report or report_default
 
     environment = load_environment_credentials(shared_env_path=INTEGRATIONS_ENV_PATH)
     api_key = environment.get("RAMEN_API_KEY")
@@ -1027,9 +1096,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"WARNING: {plan.warning}", file=sys.stderr)
 
     provider_mode = "OpenAI BYOK" if provider_options else "managed"
-    print(f"Evaluating {len(plans)} scenarios at {API_BASE_URL} ({provider_mode}); planner: {planner_mode}")
+    policy_mode = (
+        f"isolated policy {target_policy_id}"
+        if not bundle_ids
+        else f"bundle {', '.join(bundle_ids)}"
+    )
+    print(f"Evaluating {len(plans)} scenarios at {API_BASE_URL} ({provider_mode}; {policy_mode}); planner: {planner_mode}")
     with RecordingRamenClient(api_key) as client:
-        results = run_suite(plans, client, provider_options=provider_options)
+        results = run_suite(
+            plans,
+            client,
+            provider_options=provider_options,
+            policy_ids=policy_ids,
+            bundle_ids=bundle_ids,
+            target_policy_id=target_policy_id,
+        )
     summary = summarize(results)
     report = render_report(
         results,
@@ -1037,11 +1118,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         planner_mode=planner_mode,
         provider_mode=provider_mode,
+        bundle_ids=bundle_ids,
+        target_policy_id=target_policy_id,
     )
-    arguments.report.parent.mkdir(parents=True, exist_ok=True)
-    arguments.report.write_text(report, encoding="utf-8")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report, encoding="utf-8")
 
-    print(render_summary_table(summary))
+    print(render_summary_table(summary, target_policy_id=target_policy_id))
     for result in results:
         if not result.matches_expectation:
             print(
@@ -1051,7 +1134,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     print(
         f"Overall {'PASS' if summary.passed else 'FAIL'}; safety targets "
-        f"{'met' if summary.safety_targets_met else 'NOT met'}. Report written to {arguments.report}"
+        f"{'met' if summary.safety_targets_met else 'NOT met'}. Report written to {report_path}"
     )
     return 0 if summary.passed else 1
 
