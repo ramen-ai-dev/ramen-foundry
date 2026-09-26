@@ -243,7 +243,7 @@ In the default governed mode, the arm descends to a waypoint 15 cm above the man
 From a source checkout, install the simulation dependency and run the demo. On macOS the MuJoCo viewer requires the `mjpython` launcher, so replace `python` with `mjpython`:
 
 ```bash
-pip install "ramen-foundry[simulation]>=0.1.7"
+pip install "ramen-foundry[simulation]>=0.1.8"
 python examples/simulate_flagship_plunge.py
 ```
 

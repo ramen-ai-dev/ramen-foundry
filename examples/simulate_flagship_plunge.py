@@ -278,7 +278,7 @@ class FlagshipMujocoWorkcell:
             import mujoco
         except ImportError as error:  # pragma: no cover - install environment
             raise RuntimeError(
-                'Install the simulator with `pip install "ramen-foundry[simulation]>=0.1.7"`.'
+                'Install the simulator with `pip install "ramen-foundry[simulation]>=0.1.8"`.'
             ) from error
         self.mujoco = mujoco
         self.model = mujoco.MjModel.from_xml_string(build_mjcf())
@@ -552,7 +552,7 @@ class FlagshipRecorder:
             from PIL import Image, ImageDraw, ImageFont
         except ImportError as error:  # pragma: no cover - install environment
             raise RuntimeError(
-                'Recording requires `pip install "ramen-foundry[simulation]>=0.1.7"`.'
+                'Recording requires `pip install "ramen-foundry[simulation]>=0.1.8"`.'
             ) from error
         self._image, self._draw, self._font = Image, ImageDraw, ImageFont
         self.workcell = workcell
