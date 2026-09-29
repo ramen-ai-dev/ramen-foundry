@@ -1049,6 +1049,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="target policy UUID to evaluate in isolation (defaults to the robotics physical safety policy)",
     )
+    parser.add_argument(
+        "--byok",
+        action="store_true",
+        help="forward OpenAI BYOK credentials to the action gate (spends OpenAI tokens; default is managed mode)",
+    )
     arguments = parser.parse_args(argv)
 
     target_policy_id = arguments.policy_id or ROBOTICS_PHYSICAL_SAFETY_POLICY_ID
@@ -1068,7 +1073,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not api_key:
         raise RuntimeError("RAMEN_API_KEY must be supplied through the environment or a .env file")
     openai_api_key = environment.get("OPENAI_API_KEY")
-    provider_options = provider_options_from_environment(environment)
+    if arguments.byok or arguments.live_model or arguments.record_traces:
+        provider_options = provider_options_from_environment(environment)
+    else:
+        # Default trace-replay runs under managed-provider mode, consuming zero OpenAI API tokens
+        provider_options = {}
     scenarios = build_roboharm_scenarios()
 
     if arguments.record_traces:

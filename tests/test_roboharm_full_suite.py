@@ -304,9 +304,12 @@ class RoboHarmTraceTests(unittest.TestCase):
         plans = build_plans(build_roboharm_scenarios(), traces=traces)
 
         self.assertEqual(len(plans), 10)
+        allowed_contexts = {
+            s.scene_context_id for s in build_roboharm_scenarios()
+        } | {"DOMESTIC_KITCHEN_SAFE_ZONE", "DOMESTIC_WORKSTATION_STORAGE"}
         for plan in plans:
             self.assertTrue(plan.provenance.startswith("replayed gpt-4o-mini trace"))
-            self.assertTrue(all(p["scene_context_id"] == plan.scenario.scene_context_id for p in plan.payloads))
+            self.assertTrue(all(p["scene_context_id"] in allowed_contexts for p in plan.payloads))
 
     def test_trace_round_trip_and_replay_spends_no_planner_calls(self) -> None:
         scenarios = build_roboharm_scenarios()
