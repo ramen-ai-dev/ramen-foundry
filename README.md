@@ -84,6 +84,65 @@ Pre-execution failures—evaluation errors, blocked verdicts, missing or invalid
 
 The Foundry node is synchronous and non-streaming. The underlying `ramen-ai-core` SDK also exposes streaming governed generation for applications that need progress events.
 
+### `RamenSteerNode`: closed-loop self-healing
+
+`RamenSteerNode` extends `RamenToolNode` with a bounded repair loop. Every resolved tool call is evaluated before dispatch:
+
+- **Allowed with a verified receipt:** the tool runs, the complete Schema V5 receipt is attached to `ToolMessage.response_metadata["receipt"]`, and the graph routes to `next_node` (default: the planner). If the call repairs a previously blocked attempt and a memory store is bound, a `CorrectionExemplar` is recorded.
+- **Blocked:** the tool is not invoked. The planner receives a structured reflection carrying only the primary statutory anchor, which keeps the context window small:
+
+```text
+[ACTION BLOCKED BY RAMEN ACTION GATE]
+Rule Violated: {rule_id} ({primary_anchor})
+Reason: {reason}
+Steering Directive: {steering}
+Instruction: Replan and re-invoke the tool with parameters satisfying the steering directive.
+```
+
+The node routes back to `planner_node` at most `max_repair_turns` times (default: `2`), then routes to `halt_node` (default: `END`). Evaluation failures, unverifiable receipts, unregistered tools, and tool exceptions also fail closed to `halt_node` without a retry. Loop state lives in `repair_turns` and `pending_correction`, alongside `tool_invocation`, `messages`, and `governance_error`. When a memory store is bound, `state["task"]` (configurable via `task_key`) is required and fingerprinted with SHA-256.
+
+```python
+from os import environ
+from langgraph.graph import END, START, StateGraph
+from ramen_ai import RamenClient
+from ramen_foundry import JSONFileMemoryStore, RamenSteerNode
+from ramen_foundry.templates.fintech import CREDIT_ADVERSE_ACTION_POLICY_ID
+
+# issue_credit_adverse_action is a host-supplied LangChain BaseTool.
+steer = RamenSteerNode(
+    client=RamenClient(environ["RAMEN_API_KEY"]),
+    tools={"issue_credit_adverse_action": issue_credit_adverse_action},
+    planner_node="planner",
+    policy_ids=[CREDIT_ADVERSE_ACTION_POLICY_ID],
+    memory_store=JSONFileMemoryStore("agent_memory.json"),
+)
+workflow = StateGraph(AgentState)  # task, messages, tool_invocation, repair_turns, pending_correction, governance_error
+workflow.add_node("planner", planner, destinations=("ramen_steer", END))
+workflow.add_node("ramen_steer", steer, destinations=("planner", END))
+workflow.add_edge(START, "planner")
+graph = workflow.compile()
+```
+
+The planner sets `tool_invocation` and routes to `ramen_steer`. `RamenSteerNode` returns a `Command` that routes either back to the planner or onward. Pass `provider_key` and `provider_name` together for BYOK, or omit both for Enterprise managed-provider inference.
+
+`examples/self_healing_agent_demo.py` runs this loop live. On turn 1 the planner cites a ZIP-code proxy (`REGIONAL_ECONOMIC_VOLATILITY_ZIP_CODE`) and is blocked before dispatch under ECOA / Regulation B. On turn 2 it follows the steering directive, cites reasons attributable to the model's negative SHAP factors (`INSUFFICIENT_LIQUIDITY`, `EXCESSIVE_REPAYMENT_TERM`), and is allowed with a verified receipt. The repair is recorded to `agent_memory.json`.
+
+### Episodic memory: `BaseEpisodicMemoryStore`
+
+`BaseEpisodicMemoryStore` is the exemplar cache protocol:
+
+- `record_correction(exemplar)` persists one `CorrectionExemplar` and rejects duplicate `exemplar_id` values.
+- `retrieve_relevant_exemplars(task_fingerprint, tool_name, limit=3)` returns matching exemplars, newest first. A planner can call it before its first attempt so it gets a known repair right without spending a blocked turn.
+
+A `CorrectionExemplar` records `exemplar_id` (UUID), `task_fingerprint` (SHA-256 of the task), `tool_name`, `failed_arguments`, `violation_reason`, `primary_statutory_anchor`, `steering_directive`, `repaired_arguments`, `receipt_id`, and `created_at` (ISO 8601, UTC). Use `CorrectionExemplar.create(...)` to generate the ID, fingerprint, and timestamp.
+
+| Store | Backing | Notes |
+|---|---|---|
+| `JSONFileMemoryStore(path="agent_memory.json")` | Single versioned JSON document | Thread-safe in-process; atomic temp-file + `fsync` + `os.replace` writes. Not coordinated across processes. Corrupt files raise rather than being overwritten. |
+| `SQLiteMemoryStore(path="ramen_memory.db")` | Embedded SQLite | Composite index on `(task_fingerprint, tool_name, created_at)`. One locked connection shared across threads; call `close()` or use as a context manager. |
+
+Exemplars store tool arguments verbatim, including any signatures or account identifiers. Keep store files on storage with access controls appropriate to that data.
+
 ## Operational Scope & Boundary Demarcation
 
 **The ingestion invariant.** ramen-foundry templates govern resolved tool-execution payloads at the graph's pre-execution boundary (`tools/pre-execute`). The L2 gate evaluates the proposed capability name and its explicit arguments against the bound policy or bundle, requires a locally verified receipt, and only then releases the registered host tool. It enforces invariant decision contracts on the payload presented to that boundary; it does not reconstruct facts that are absent from the payload.
@@ -301,7 +360,7 @@ The human-review flag is an application contract, not a built-in LangGraph inter
 | Tool name | Intended capability |
 |---|---|
 | `inspect_directory` | Inspect paths, sizes, and cleanup candidates without mutation. |
-| `delete_path` | Delete a host-approved cache, build output, or other path. |
+| `delete_path` | Request deletion of a host-selected path. The Core IT bundle evaluates deletions conservatively and may block them even when they are scoped to cache or build output. |
 | `terminate_process` | Terminate an explicitly identified orphan process. |
 
 All requests are evaluated before tool lookup or execution. Attempts to remove system paths, user roots, shell configuration, credential material, or unrelated processes are expected to be denied by the bound Core IT controls. Hosts should additionally constrain deletion roots and process ownership inside their tool implementations.
@@ -404,24 +463,29 @@ Semantic governance is not a replacement for OS permissions, sandboxing, read-on
 
 ```python
 from ramen_foundry import (
+    BaseEpisodicMemoryStore,
     CommercialLendingAgent,
+    CorrectionExemplar,
     DbShieldAgent,
     DevboxShieldAgent,
     EU_AI_ACT_PROXY_BIAS_POLICY_ID,
     INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID,
     IndustrialAutomationAgent,
+    JSONFileMemoryStore,
     RamenGovernedNode,
+    RamenSteerNode,
     RamenToolNode,
     ResumeScreeningAgent,
     ResumeScreeningRequest,
     ResumeScreeningResult,
     SHIELD_CORE_IT_BUNDLE_ID,
+    SQLiteMemoryStore,
     ScoutShieldAgent,
     ToolInvocation,
 )
 ```
 
-`ToolInvocation` contains a non-empty `name`, an `arguments` dictionary, and a non-empty `tool_call_id`. `RamenToolNode` and `RamenGovernedNode` accept explicit `policy_ids`, `bundle_ids`, or both; at least one scope is required.
+`ToolInvocation` contains a non-empty `name`, an `arguments` dictionary, and a non-empty `tool_call_id`. `RamenToolNode`, `RamenSteerNode`, and `RamenGovernedNode` accept explicit `policy_ids`, `bundle_ids`, or both; at least one scope is required.
 
 ## Runtime dependencies
 

@@ -1,21 +1,25 @@
-"""Closed-loop self-healing wire agent built on RamenSteerNode.
+"""Closed-loop self-healing credit adverse-action agent built on RamenSteerNode.
 
-The agent is tasked with a $150,000 commercial wire that lacks UCC Article 4A
-dual-control evidence. ``RamenSteerNode`` gates every ``dispatch_wire`` call
-against the FinTech Banking Invariance bundle before dispatch:
+An underwriting agent must issue an adverse-action notice for a declined
+commercial credit application. ``RamenSteerNode`` gates every
+``issue_credit_adverse_action`` call against the credit adverse-action policy
+(ECOA Regulation B / CFPB Circular 2023-03) before dispatch:
 
-* Turn 1: the unsigned wire is blocked pre-dispatch. The planner receives a
-  structured reflection carrying the rule, primary statutory anchor, and the
-  ramen-ai steering directive.
-* Turn 2: the planner reads the directive, obtains the treasury co-signer's
-  Ed25519 signature over the wire's authorization fields, and re-invokes the
-  tool. The repair is allowed, the wire is dispatched, the verified Schema V5
-  receipt is surfaced in the tool metadata, and the correction exemplar is
-  written to ``agent_memory.json``.
+* Turn 1: the planner cites a geographic proxy
+  (``REGIONAL_ECONOMIC_VOLATILITY_ZIP_CODE``) that is not supported by the
+  model's attribution evidence. The call is blocked pre-dispatch, and the
+  planner receives a structured reflection carrying the rule, primary
+  statutory anchor, and the ramen-ai steering directive.
+* Turn 2: the planner reads the directive and replaces the reason codes with
+  ones attributable to the model's strongest negative SHAP factors
+  (``checking_balance`` -> ``INSUFFICIENT_LIQUIDITY``, ``repayment_duration``
+  -> ``EXCESSIVE_REPAYMENT_TERM``). The repair is allowed, the tool is
+  dispatched, the verified Schema V5 receipt is surfaced in the tool metadata,
+  and the correction exemplar is written to ``agent_memory.json``.
 
 The planner is deterministic so the loop is reproducible; in production it is
-an LLM node that reads the same reflection message. The co-signer key is
-generated per run to stand in for a treasury officer's signing device.
+an LLM node that reads the same reflection message. The notice tool is
+simulated: it records the approved notice and sends nothing to an applicant.
 
 Run from the repository root (makes live ramen-ai calls)::
 
@@ -29,16 +33,12 @@ both omitted so ramen-ai uses Enterprise managed-provider inference.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph, add_messages
@@ -48,24 +48,24 @@ from ramen_ai import RamenClient
 from ramen_foundry import JSONFileMemoryStore, RamenSteerNode, ToolInvocation
 from ramen_foundry.core.memory import fingerprint_task
 from ramen_foundry.core.steer_node import REFLECTION_HEADER
-from ramen_foundry.templates.fintech import FINTECH_BANKING_INVARIANCE_BUNDLE_ID
+from ramen_foundry.templates.fintech import CREDIT_ADVERSE_ACTION_POLICY_ID
 
 PLANNER_NODE = "planner"
 STEER_NODE = "ramen_steer"
+TOOL_NAME = "issue_credit_adverse_action"
 TASK = (
-    "Disburse the approved commercial loan: wire $150,000.00 from account "
-    "acct-commercial-1042 to Harbor Equipment LLC (routing 021000021, account "
-    "9876543210) against GL offset 1010-commercial-loans."
+    "Formulate a compliant adverse action notice for a denied commercial credit "
+    "application based on model attribution."
 )
-WIRE_SIGNED_FIELDS = (
-    "account_id",
-    "amount_usd",
-    "beneficiary_name",
-    "beneficiary_routing",
-    "beneficiary_account",
-    "sanction_clearance_token",
-    "gl_offset",
-)
+MODEL_HASH = "sha256:1ea1336c6faca52fe43060bf122c129ffb449172855c7612399db95d1cc1e7b4"
+SHAP_ATTRIBUTION_SUMMARY: dict[str, float] = {
+    "checking_balance": -0.6602,
+    "repayment_duration": -0.5456,
+    "savings_balance": -0.2627,
+    "employment_years": 0.3120,
+}
+GEOGRAPHIC_PROXY_REASONS = ["REGIONAL_ECONOMIC_VOLATILITY_ZIP_CODE"]
+ATTRIBUTED_REASONS = ["INSUFFICIENT_LIQUIDITY", "EXCESSIVE_REPAYMENT_TERM"]
 
 
 class SelfHealingState(TypedDict, total=False):
@@ -79,48 +79,15 @@ class SelfHealingState(TypedDict, total=False):
     pending_correction: dict[str, Any] | None
 
 
-def sanctions_clearance_token(payload: Mapping[str, Any]) -> str:
-    """Return the deterministic OFAC screening token bound to the beneficiary."""
-    subject = "|".join(
-        (
-            payload["beneficiary_name"],
-            payload["beneficiary_routing"],
-            payload["beneficiary_account"],
-        )
-    )
-    digest = hashlib.sha256(subject.encode()).hexdigest().upper()
-    return f"OFAC-DET-20260910-{digest[:20]}"
-
-
-def unanchored_wire() -> dict[str, Any]:
-    """Return the agent's first-pass wire: correct economics, no co-signer."""
-    payload: dict[str, Any] = {
-        "account_id": "acct-commercial-1042",
-        "amount_usd": 150000.0,
-        "beneficiary_name": "Harbor Equipment LLC",
-        "beneficiary_routing": "021000021",
-        "beneficiary_account": "9876543210",
-        "gl_offset": "1010-commercial-loans",
+def adverse_action_payload(reason_codes: list[str]) -> dict[str, Any]:
+    """Return the adverse-action arguments for the demo application."""
+    return {
+        "application_id": "APP-CREDIT-99214",
+        "decision": "DENIED",
+        "reg_b_reason_codes": list(reason_codes),
+        "model_hash": MODEL_HASH,
+        "shap_attribution_summary": dict(SHAP_ATTRIBUTION_SUMMARY),
     }
-    payload["sanction_clearance_token"] = sanctions_clearance_token(payload)
-    return payload
-
-
-def co_sign(payload: Mapping[str, Any], co_signer: Ed25519PrivateKey) -> dict[str, Any]:
-    """Attach an Ed25519 dual-control signature over the wire's authorization fields."""
-    signed = dict(payload)
-    authorization = json.dumps(
-        {field: signed[field] for field in WIRE_SIGNED_FIELDS},
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    public_key = co_signer.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    signed["co_signer_public_key"] = f"ed25519:{public_key.hex()}"
-    signed["co_signer_signature"] = f"ed25519:{co_signer.sign(authorization).hex()}"
-    return signed
 
 
 def _reflection_field(reflection: str, label: str) -> str:
@@ -131,11 +98,10 @@ def _reflection_field(reflection: str, label: str) -> str:
     return ""
 
 
-class ScriptedWirePlanner:
-    """Deterministic planner that proposes a wire and repairs it from a reflection."""
+class ScriptedUnderwritingPlanner:
+    """Deterministic planner that drafts a notice and repairs it from a reflection."""
 
-    def __init__(self, co_signer: Ed25519PrivateKey) -> None:
-        self._co_signer = co_signer
+    def __init__(self) -> None:
         self.turn = 0
 
     def __call__(self, state: Mapping[str, Any]) -> Command:
@@ -144,36 +110,36 @@ class ScriptedWirePlanner:
 
         if isinstance(last, ToolMessage) and last.status != "error":
             return Command(
-                update={"messages": [AIMessage(content=f"Wire complete: {last.content}")]},
+                update={"messages": [AIMessage(content=f"Notice issued: {last.content}")]},
                 goto=END,
             )
 
         if isinstance(last, ToolMessage) and REFLECTION_HEADER in str(last.content):
-            print("\n--- Planner: reading reflection ---")
+            print("\n--- Planner scratchpad: reading reflection ---")
             print(last.content)
             directive = _reflection_field(str(last.content), "Steering Directive")
             print(f"\nPlanner: applying steering directive -> {directive}")
-            print("Planner: requesting treasury co-signer Ed25519 signature.")
-            arguments = co_sign(unanchored_wire(), self._co_signer)
+            print("Planner: citing reasons attributable to the model's negative SHAP factors.")
+            arguments = adverse_action_payload(ATTRIBUTED_REASONS)
         else:
-            arguments = unanchored_wire()
+            arguments = adverse_action_payload(GEOGRAPHIC_PROXY_REASONS)
 
         self.turn += 1
-        tool_call_id = f"dispatch-wire-turn-{self.turn}"
-        print(f"\n=== Turn {self.turn}: planner calls dispatch_wire ===")
-        print(json.dumps(arguments, indent=2, sort_keys=True))
+        tool_call_id = f"{TOOL_NAME}-turn-{self.turn}"
+        print(
+            f"\n=== Turn {self.turn}: planner calls {TOOL_NAME}"
+            f"(reg_b_reason_codes={arguments['reg_b_reason_codes']}) ==="
+        )
         return Command(
             update={
                 "messages": [
                     AIMessage(
                         content="",
-                        tool_calls=[
-                            {"name": "dispatch_wire", "args": arguments, "id": tool_call_id}
-                        ],
+                        tool_calls=[{"name": TOOL_NAME, "args": arguments, "id": tool_call_id}],
                     )
                 ],
                 "tool_invocation": ToolInvocation(
-                    name="dispatch_wire",
+                    name=TOOL_NAME,
                     arguments=arguments,
                     tool_call_id=tool_call_id,
                 ),
@@ -186,7 +152,7 @@ def build_graph(
     *,
     client: RamenClient,
     memory_store: JSONFileMemoryStore,
-    planner: ScriptedWirePlanner,
+    planner: ScriptedUnderwritingPlanner,
     dispatched: list[dict[str, Any]],
     provider_key: str | None,
     provider_name: str | None,
@@ -194,34 +160,27 @@ def build_graph(
     """Compile the planner <-> RamenSteerNode self-healing loop."""
 
     @tool
-    def dispatch_wire(
-        account_id: str,
-        amount_usd: float,
-        beneficiary_name: str,
-        beneficiary_routing: str,
-        beneficiary_account: str,
-        sanction_clearance_token: str,
-        gl_offset: str,
-        co_signer_public_key: str,
-        co_signer_signature: str,
+    def issue_credit_adverse_action(
+        application_id: str,
+        decision: str,
+        reg_b_reason_codes: list[str],
+        model_hash: str,
+        shap_attribution_summary: dict[str, float],
     ) -> str:
-        """Dispatch a governed commercial-loan wire transfer (simulated core banking)."""
+        """Issue a governed adverse-action notice (simulated; nothing is sent)."""
         dispatched.append(
-            {
-                "account_id": account_id,
-                "amount_usd": amount_usd,
-                "beneficiary_name": beneficiary_name,
-                "co_signer_public_key": co_signer_public_key,
-            }
+            {"application_id": application_id, "reg_b_reason_codes": reg_b_reason_codes}
         )
-        reference = hashlib.sha256(co_signer_signature.encode()).hexdigest()[:12].upper()
-        return f"WIRE-{reference} queued: ${amount_usd:,.2f} to {beneficiary_name}"
+        return (
+            f"[simulated] adverse-action notice queued for {application_id}: "
+            f"{', '.join(reg_b_reason_codes)}"
+        )
 
     steer = RamenSteerNode(
         client=client,
-        tools={"dispatch_wire": dispatch_wire},
+        tools={TOOL_NAME: issue_credit_adverse_action},
         planner_node=PLANNER_NODE,
-        bundle_ids=[FINTECH_BANKING_INVARIANCE_BUNDLE_ID],
+        policy_ids=[CREDIT_ADVERSE_ACTION_POLICY_ID],
         provider_key=provider_key,
         provider_name=provider_name,
         memory_store=memory_store,
@@ -250,16 +209,17 @@ def main() -> int:
     provider_name = "openai" if provider_key else None
     mode = "BYOK (openai)" if provider_key else "Enterprise managed-provider"
     print(f"ramen-ai provider mode: {mode}")
+    print(f"Policy: {CREDIT_ADVERSE_ACTION_POLICY_ID}")
+    print(f"Task: {TASK}")
 
     memory_store = JSONFileMemoryStore(Path(args.memory_path))
-    planner = ScriptedWirePlanner(Ed25519PrivateKey.generate())
     dispatched: list[dict[str, Any]] = []
 
     with RamenClient(api_key) as client:
         graph = build_graph(
             client=client,
             memory_store=memory_store,
-            planner=planner,
+            planner=ScriptedUnderwritingPlanner(),
             dispatched=dispatched,
             provider_key=provider_key,
             provider_name=provider_name,
@@ -272,35 +232,42 @@ def main() -> int:
     print("\n=== Outcome ===")
     for index, message in enumerate(tool_messages, start=1):
         status = "BLOCKED" if message.status == "error" else "ALLOWED"
-        print(f"Turn {index}: {status}")
+        print(f"Turn {index}: [{status}]")
+    print(f"Dispatched notices: {dispatched}")
 
     if final_state.get("governance_error"):
         print(f"Loop halted: {final_state['governance_error']}")
         return 1
     if len(tool_messages) < 2 or tool_messages[0].status != "error":
-        print("Expected the unsigned wire to be blocked before the repair was allowed.")
+        print("Expected the proxy-based notice to be blocked before the repair was allowed.")
+        return 1
+    if [notice["reg_b_reason_codes"] for notice in dispatched] != [ATTRIBUTED_REASONS]:
+        print("Expected only the attributed notice to be dispatched.")
         return 1
 
     final_metadata = tool_messages[-1].response_metadata
     receipt = final_metadata.get("receipt") or {}
-    print(f"Dispatched wires: {len(dispatched)}")
     print(f"Tool result: {tool_messages[-1].content}")
     print(f"Receipt verified (Ed25519): {final_metadata.get('receipt_verified')}")
     print(f"Receipt id: {receipt.get('id')}")
     print(f"Receipt schema_version: {receipt.get('schema_version')}")
     print(f"Receipt kid: {receipt.get('kid')}")
+    print(f"Receipt signature: {receipt.get('signature')}")
     if final_metadata.get("memory_error"):
         print(f"Episodic memory error: {final_metadata['memory_error']}")
         return 1
-    print(f"Exemplar recorded: {final_metadata.get('exemplar_id')} -> {memory_store.path}")
+    if not final_metadata.get("receipt_verified") or not final_metadata.get("exemplar_id"):
+        print("Expected a verified receipt and a recorded exemplar for the repair.")
+        return 1
+    print(f"Exemplar recorded: {final_metadata['exemplar_id']} -> {memory_store.path}")
 
-    exemplars = memory_store.retrieve_relevant_exemplars(
-        fingerprint_task(TASK), "dispatch_wire"
-    )
+    exemplars = memory_store.retrieve_relevant_exemplars(fingerprint_task(TASK), TOOL_NAME)
     print(f"Zero-turn retrieval for this task: {len(exemplars)} exemplar(s)")
     if exemplars:
         latest = exemplars[0]
-        print(f"  anchor: {latest.primary_statutory_anchor}")
+        print(f"  failed reasons:   {latest.failed_arguments['reg_b_reason_codes']}")
+        print(f"  repaired reasons: {latest.repaired_arguments['reg_b_reason_codes']}")
+        print(f"  anchor:   {latest.primary_statutory_anchor}")
         print(f"  steering: {latest.steering_directive}")
     return 0
 
