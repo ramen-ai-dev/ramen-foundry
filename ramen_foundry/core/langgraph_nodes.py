@@ -58,22 +58,9 @@ class RamenToolNode:
 
     def __call__(self, state: Mapping[str, Any]) -> Command:
         invocation = ToolInvocation.model_validate(state["tool_invocation"])
-        payload = json.dumps(
-            {"tool": invocation.name, "arguments": invocation.arguments},
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
 
         try:
-            verdict = self._client.evaluate_compliance(
-                payload,
-                policy_ids=self._policy_ids,
-                bundle_ids=self._bundle_ids,
-                context={"tool_name": invocation.name},
-                provider_key=self._provider_key,
-                provider_name=self._provider_name,
-            )
+            verdict = self._evaluate(invocation)
         except Exception as error:  # noqa: BLE001
             return self._return_error(
                 invocation,
@@ -120,6 +107,23 @@ class RamenToolNode:
                 "tool_invocation": None,
             },
             goto=self._llm_node,
+        )
+
+    def _evaluate(self, invocation: ToolInvocation) -> dict[str, Any]:
+        """Evaluate one resolved tool call through the ramen-ai SDK."""
+        payload = json.dumps(
+            {"tool": invocation.name, "arguments": invocation.arguments},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return self._client.evaluate_compliance(
+            payload,
+            policy_ids=self._policy_ids,
+            bundle_ids=self._bundle_ids,
+            context={"tool_name": invocation.name},
+            provider_key=self._provider_key,
+            provider_name=self._provider_name,
         )
 
     def _return_error(self, invocation: ToolInvocation, reason: str) -> Command:

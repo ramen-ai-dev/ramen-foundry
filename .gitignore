@@ -9,3 +9,5 @@ build/
 .DS_Store
 recordings/
 .env
+agent_memory.json
+ramen_memory.db
