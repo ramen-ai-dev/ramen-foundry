@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 import sqlite3
 import tempfile
 import threading
@@ -24,6 +26,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
+
+logger = logging.getLogger(__name__)
 
 _JSON_STORE_FORMAT_VERSION = 1
 _EXEMPLAR_FIELDS = (
@@ -61,6 +68,10 @@ class CorrectionExemplar:
     repaired_arguments: dict[str, Any] = field(repr=False)
     receipt_id: str | None
     created_at: str
+    # Original task text, kept in memory only. It is excluded from to_dict(),
+    # equality, and the local stores; RemoteForgeMemoryStore sends it because
+    # ramen forge requires task_fingerprint == SHA-256(task_description).
+    task_description: str | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         try:
@@ -95,6 +106,11 @@ class CorrectionExemplar:
             raise ValueError("created_at must be an ISO 8601 timestamp") from error
         if parsed.tzinfo is None:
             raise ValueError("created_at must include a UTC offset")
+        if self.task_description is not None:
+            if not isinstance(self.task_description, str) or not self.task_description.strip():
+                raise ValueError("task_description must be None or a non-blank string")
+            if fingerprint_task(self.task_description) != self.task_fingerprint:
+                raise ValueError("task_fingerprint does not match SHA-256(task_description)")
 
     @classmethod
     def create(
@@ -121,21 +137,35 @@ class CorrectionExemplar:
             repaired_arguments=dict(repaired_arguments),
             receipt_id=receipt_id,
             created_at=datetime.now(timezone.utc).isoformat(),
+            task_description=task,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-compatible representation of the exemplar."""
-        return asdict(self)
+        """Return a JSON-compatible representation of the exemplar.
+
+        ``task_description`` is deliberately excluded so local stores never
+        persist raw task text.
+        """
+        data = asdict(self)
+        data.pop("task_description")
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CorrectionExemplar:
-        """Rebuild an exemplar from :meth:`to_dict` output, validating every field."""
+        """Rebuild an exemplar from :meth:`to_dict` output, validating every field.
+
+        Unknown keys are ignored. An optional ``task_description`` (as served by
+        ramen forge) is kept when present.
+        """
         if not isinstance(data, dict):
             raise ValueError("exemplar record must be a JSON object")
         missing = [name for name in _EXEMPLAR_FIELDS if name not in data]
         if missing:
             raise ValueError(f"exemplar record is missing fields: {', '.join(missing)}")
-        return cls(**{name: data[name] for name in _EXEMPLAR_FIELDS})
+        return cls(
+            **{name: data[name] for name in _EXEMPLAR_FIELDS},
+            task_description=data.get("task_description"),
+        )
 
 
 class BaseEpisodicMemoryStore(ABC):
@@ -373,3 +403,164 @@ class SQLiteMemoryStore(BaseEpisodicMemoryStore):
         if self._connection is None:
             raise RuntimeError("SQLiteMemoryStore is closed")
         return self._connection
+
+
+_FORGE_EXEMPLARS_PATH = "/api/v1/exemplars"
+_FORGE_MAX_LIMIT = 50
+_FORGE_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class RemoteForgeMemoryStore(BaseEpisodicMemoryStore):
+    """Share exemplars through a ramen forge service over HTTP.
+
+    Reads go to ``GET /api/v1/exemplars`` and are public. They fail open: a
+    network error, timeout, HTTP error, or malformed response is logged and
+    returns ``[]``, because memory is advisory and every call is still
+    evaluated by the ramen-ai policy boundary. Records that fail
+    :class:`CorrectionExemplar` validation, or that do not match the requested
+    ``task_fingerprint`` and ``tool_name``, are skipped.
+
+    Writes go to ``POST /api/v1/exemplars`` with ``Authorization: Bearer``. They
+    require ``write_token`` and an exemplar that carries its
+    ``task_description`` (exemplars built with :meth:`CorrectionExemplar.create`
+    do). A duplicate ``exemplar_id`` (HTTP 409) is ignored. Any other failure
+    raises, so :class:`RamenSteerNode` reports it as ``memory_error``.
+
+    Contributed records, including the task description and tool arguments,
+    become publicly readable. Treat retrieved exemplars as untrusted guidance.
+    """
+
+    def __init__(
+        self,
+        base_url: str = "https://ramen-forge.ramenai.workers.dev",
+        write_token: str | None = None,
+        domain: str = "fintech",
+        timeout_sec: float = 5.0,
+    ) -> None:
+        parts = urlsplit(base_url)
+        if parts.scheme != "https" and not (
+            parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS
+        ):
+            raise ValueError("base_url must use https (http is allowed only for localhost)")
+        if not isinstance(domain, str) or not _FORGE_DOMAIN_RE.match(domain):
+            raise ValueError("domain must be a lowercase slug (a-z, 0-9, '_' or '-', 2-64 characters)")
+        if isinstance(timeout_sec, bool) or not isinstance(timeout_sec, (int, float)) or timeout_sec <= 0:
+            raise ValueError("timeout_sec must be a positive number")
+        self.base_url = base_url.rstrip("/")
+        self.write_token = write_token if write_token and write_token.strip() else None
+        self.domain = domain
+        self.timeout_sec = float(timeout_sec)
+
+    def __repr__(self) -> str:
+        # Never include the write token.
+        return (
+            f"{type(self).__name__}(base_url={self.base_url!r}, domain={self.domain!r}, "
+            f"writable={self.write_token is not None})"
+        )
+
+    def retrieve_relevant_exemplars(
+        self,
+        task_fingerprint: str,
+        tool_name: str,
+        limit: int = 3,
+    ) -> list[CorrectionExemplar]:
+        _validate_limit(limit)
+        if limit > _FORGE_MAX_LIMIT:
+            raise ValueError(f"limit must be at most {_FORGE_MAX_LIMIT}")
+        url = f"{self.base_url}{_FORGE_EXEMPLARS_PATH}"
+        params = {
+            "domain": self.domain,
+            "tool_name": tool_name,
+            "task_fingerprint": task_fingerprint,
+            "limit": str(limit),
+        }
+        try:
+            response = httpx.get(
+                url,
+                params=params,
+                headers={"Accept": "application/json"},
+                timeout=self.timeout_sec,
+            )
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError) as error:
+            logger.warning("ramen-foundry: ramen forge retrieval failed; continuing without exemplars: %s", error)
+            return []
+
+        records = body.get("exemplars") if isinstance(body, dict) else None
+        if not isinstance(records, list):
+            logger.warning("ramen-foundry: ramen forge returned an unexpected response shape; ignoring it")
+            return []
+
+        exemplars: list[CorrectionExemplar] = []
+        for record in records:
+            try:
+                exemplar = CorrectionExemplar.from_dict(record)
+            except (TypeError, ValueError) as error:
+                logger.warning("ramen-foundry: skipping invalid ramen forge exemplar: %s", error)
+                continue
+            if exemplar.task_fingerprint != task_fingerprint or exemplar.tool_name != tool_name:
+                logger.warning(
+                    "ramen-foundry: skipping ramen forge exemplar %s that does not match the query",
+                    exemplar.exemplar_id,
+                )
+                continue
+            exemplars.append(exemplar)
+        return exemplars[:limit]
+
+    def record_correction(self, exemplar: CorrectionExemplar) -> None:
+        if not isinstance(exemplar, CorrectionExemplar):
+            raise TypeError("exemplar must be a CorrectionExemplar")
+        if self.write_token is None:
+            raise PermissionError("RemoteForgeMemoryStore is read-only: no write_token configured")
+        if exemplar.task_description is None:
+            raise ValueError(
+                "exemplar has no task_description; ramen forge requires "
+                "task_fingerprint == SHA-256(task_description). Build exemplars "
+                "with CorrectionExemplar.create(task=...)."
+            )
+        payload = exemplar.to_dict() | {
+            "domain": self.domain,
+            "task_description": exemplar.task_description,
+        }
+        try:
+            response = httpx.post(
+                f"{self.base_url}{_FORGE_EXEMPLARS_PATH}",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self.write_token}",
+                    "Accept": "application/json",
+                },
+                timeout=self.timeout_sec,
+            )
+        except httpx.HTTPError as error:
+            raise RuntimeError(f"ramen forge write failed: {error}") from error
+
+        if response.status_code == 409:
+            logger.info("ramen-foundry: ramen forge already holds exemplar %s", exemplar.exemplar_id)
+            return
+        if response.status_code not in (200, 201):
+            raise RuntimeError(
+                f"ramen forge rejected exemplar {exemplar.exemplar_id} "
+                f"(HTTP {response.status_code}): {_forge_error_detail(response)}"
+            )
+        logger.info(
+            "ramen-foundry: contributed exemplar %s to ramen forge (HTTP %s)",
+            exemplar.exemplar_id,
+            response.status_code,
+        )
+
+
+def _forge_error_detail(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:200] or "no response body"
+    if not isinstance(body, dict):
+        return "unexpected response body"
+    detail = str(body.get("error") or "unknown error")
+    details = body.get("details")
+    if isinstance(details, list) and details:
+        detail += ": " + "; ".join(str(item) for item in details[:5])
+    return detail

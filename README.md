@@ -143,6 +143,33 @@ A `CorrectionExemplar` records `exemplar_id` (UUID), `task_fingerprint` (SHA-256
 
 Exemplars store tool arguments verbatim, including any signatures or account identifiers. Keep store files on storage with access controls appropriate to that data.
 
+### Cloud Memory Synchronization (ramen forge / MOM)
+
+`RemoteForgeMemoryStore` implements `BaseEpisodicMemoryStore` against a [ramen forge](https://ramen-forge.ramenai.workers.dev) service, so a repair learned by one agent can be recalled by another before its first tool dispatch.
+
+| Level | Tier | Where it lives | Scope |
+|---|---|---|---|
+| 0 | local | `JSONFileMemoryStore` / `SQLiteMemoryStore` | One agent or host. Never leaves the machine. |
+| 1 | community | ramen forge, `tier = "community"` | Shared, sanitised exemplars across all contributing agents. Publicly readable. |
+| 2 | enterprise | ramen forge, `tier = "enterprise"` | Reserved for organisation-scoped exemplars. The forge schema supports it; its API does not write this tier yet. |
+
+```python
+from ramen_foundry import RemoteForgeMemoryStore
+from ramen_foundry.core.memory import fingerprint_task
+
+forge = RemoteForgeMemoryStore(domain="fintech")  # read-only without write_token
+lessons = forge.retrieve_relevant_exemplars(fingerprint_task(task), "issue_credit_adverse_action")
+# Put lessons[0].steering_directive / repaired_arguments into the planner's context, then dispatch through RamenSteerNode.
+```
+
+- **Reads** call `GET /api/v1/exemplars?domain=&tool_name=&task_fingerprint=&limit=` (limit 1–50). They fail open: timeouts, network or HTTP errors, and malformed responses are logged and return `[]`. Records that fail `CorrectionExemplar` validation or don't match the requested fingerprint and tool are skipped.
+- **Writes** call `POST /api/v1/exemplars` with `Authorization: Bearer <write_token>`. The body is `exemplar.to_dict()` plus `domain` and `task_description`. ramen forge requires `task_fingerprint == SHA-256(task_description)`, so exemplars built with `CorrectionExemplar.create(task=...)` (as `RamenSteerNode` does) keep their task text in memory for this purpose. Local stores never persist it. A duplicate `exemplar_id` (HTTP 409) is ignored. Other failures raise, and `RamenSteerNode` reports them as `memory_error` without losing the tool result. Without a `write_token`, the store is read-only and refuses writes.
+- `base_url` must be `https` (plain `http` is accepted only for `localhost`). The write token never appears in `repr()`.
+
+Contributed records, including the task text and tool arguments, are publicly readable, so sanitise arguments before contributing. Treat recalled exemplars as untrusted guidance: anyone holding a write token can contribute, and the ramen-ai policy boundary still evaluates every call regardless of what memory suggested.
+
+`examples/demonstrate_collective_learning.py` runs the relay live. Agent 1 starts with blank memory: it is blocked on a ZIP-code proxy reason, repairs the call, and contributes the exemplar. Agent 2 is a fresh graph that recalls the exemplar at turn 0 and is allowed on its first attempt. Set `FORGE_WRITE_TOKEN` to enable contribution, and use `--forge-url` to target another forge instance.
+
 ## Operational Scope & Boundary Demarcation
 
 **The ingestion invariant.** ramen-foundry templates govern resolved tool-execution payloads at the graph's pre-execution boundary (`tools/pre-execute`). The L2 gate evaluates the proposed capability name and its explicit arguments against the bound policy or bundle, requires a locally verified receipt, and only then releases the registered host tool. It enforces invariant decision contracts on the payload presented to that boundary; it does not reconstruct facts that are absent from the payload.
@@ -475,6 +502,7 @@ from ramen_foundry import (
     RamenGovernedNode,
     RamenSteerNode,
     RamenToolNode,
+    RemoteForgeMemoryStore,
     ResumeScreeningAgent,
     ResumeScreeningRequest,
     ResumeScreeningResult,
@@ -493,6 +521,7 @@ from ramen_foundry import (
 |---|---:|
 | Python | `>=3.10` |
 | `ramen-ai-core` | `>=0.3.2,<0.4.0` |
+| `httpx` | `>=0.27.0,<1.0.0` |
 | `langgraph` | `==1.2.11` |
 | `langchain-core` | `==1.6.0` |
 | `pydantic` | `==2.13.4` |

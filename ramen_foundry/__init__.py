@@ -6,6 +6,7 @@ from .core import (
     RamenGovernedNode,
     RamenSteerNode,
     RamenToolNode,
+    RemoteForgeMemoryStore,
     SQLiteMemoryStore,
     ToolInvocation,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "RamenGovernedNode",
     "RamenSteerNode",
     "RamenToolNode",
+    "RemoteForgeMemoryStore",
     "ResumeScreeningAgent",
     "ResumeScreeningRequest",
     "ResumeScreeningResult",
@@ -43,4 +45,4 @@ __all__ = [
     "ScoutShieldAgent",
     "ToolInvocation",
 ]
-__version__ = "0.2.0"
+__version__ = "0.2.1"

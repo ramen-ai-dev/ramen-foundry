@@ -4,6 +4,7 @@ from .memory import (
     BaseEpisodicMemoryStore,
     CorrectionExemplar,
     JSONFileMemoryStore,
+    RemoteForgeMemoryStore,
     SQLiteMemoryStore,
 )
 from .steer_node import RamenSteerNode
@@ -14,6 +15,7 @@ __all__ = [
     "RamenGovernedNode",
     "RamenSteerNode",
     "RamenToolNode",
+    "RemoteForgeMemoryStore",
     "SQLiteMemoryStore",
     "ToolInvocation",
 ]
