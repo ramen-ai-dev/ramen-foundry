@@ -20,6 +20,15 @@ from ramen_foundry import (
 from ramen_foundry.core.memory import fingerprint_task
 
 TASK = "Wire $150,000 to Harbor Equipment LLC"
+RECEIPT = {
+    "id": "rcpt-0001",
+    "schema_version": "5.0",
+    "kid": "ramen_pk_v1",
+    "signature": "c2lnbmF0dXJl",
+    "canonical_payload": '{"id":"rcpt-0001","verdict":1}',
+    "statutory_anchors": ["UCC § 4A-202"],
+    "attestation": None,
+}
 
 
 def _exemplar(
@@ -28,6 +37,7 @@ def _exemplar(
     tool_name: str = "dispatch_wire",
     created_at: str | None = None,
     receipt_id: str | None = "rcpt-0001",
+    receipt: dict | None = RECEIPT,
 ) -> CorrectionExemplar:
     exemplar = CorrectionExemplar.create(
         task=task,
@@ -38,6 +48,7 @@ def _exemplar(
         steering_directive="Attach an Ed25519 co-signer signature.",
         repaired_arguments={"amount_usd": 150000.0, "co_signer_signature": "ed25519:ab"},
         receipt_id=receipt_id,
+        receipt=receipt if receipt_id is not None else None,
     )
     return replace(exemplar, created_at=created_at) if created_at else exemplar
 
@@ -89,6 +100,7 @@ class _StoreContract:
             fingerprint_task(TASK), "dispatch_wire"
         )
         self.assertEqual(retrieved, [exemplar])
+        self.assertEqual(retrieved[0].receipt, RECEIPT)
 
     def test_retrieval_filters_by_task_and_tool_newest_first_with_limit(self) -> None:
         store = self.make_store()
@@ -119,6 +131,7 @@ class _StoreContract:
         store.record_correction(exemplar)
         retrieved = store.retrieve_relevant_exemplars(fingerprint_task(TASK), "dispatch_wire")
         self.assertIsNone(retrieved[0].receipt_id)
+        self.assertIsNone(retrieved[0].receipt)
 
     def test_duplicate_exemplar_id_is_rejected(self) -> None:
         store = self.make_store()
@@ -245,6 +258,35 @@ class SQLiteMemoryStoreTests(_StoreContract, unittest.TestCase):
             ]
         self.assertIn(("idx_correction_exemplars_lookup",), indexes)
         self.assertEqual(columns, ["task_fingerprint", "tool_name", "created_at"])
+
+    def test_pre_receipt_database_is_migrated(self) -> None:
+        legacy = sqlite3.connect(self.path)
+        legacy.execute(
+            "CREATE TABLE correction_exemplars (exemplar_id TEXT PRIMARY KEY, "
+            "task_fingerprint TEXT NOT NULL, tool_name TEXT NOT NULL, failed_arguments TEXT NOT NULL, "
+            "violation_reason TEXT NOT NULL, primary_statutory_anchor TEXT NOT NULL, "
+            "steering_directive TEXT NOT NULL, repaired_arguments TEXT NOT NULL, receipt_id TEXT, "
+            "created_at TEXT NOT NULL)"
+        )
+        old = _exemplar(receipt_id=None)
+        legacy.execute(
+            "INSERT INTO correction_exemplars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                old.exemplar_id, old.task_fingerprint, old.tool_name, json.dumps(old.failed_arguments),
+                old.violation_reason, old.primary_statutory_anchor, old.steering_directive,
+                json.dumps(old.repaired_arguments), None, old.created_at,
+            ),
+        )
+        legacy.commit()
+        legacy.close()
+
+        store = self.make_store()
+        new = _exemplar(created_at="2999-01-01T00:00:00+00:00")
+        store.record_correction(new)
+        retrieved = store.retrieve_relevant_exemplars(fingerprint_task(TASK), "dispatch_wire", limit=5)
+        self.assertEqual([e.exemplar_id for e in retrieved], [new.exemplar_id, old.exemplar_id])
+        self.assertEqual(retrieved[0].receipt, RECEIPT)
+        self.assertIsNone(retrieved[1].receipt)
 
     def test_closed_store_raises(self) -> None:
         store = self.make_store()

@@ -300,6 +300,9 @@ class RamenSteerNode(RamenToolNode):
                 steering_directive=str(pending.get("steering_directive") or _DEFAULT_STEERING),
                 repaired_arguments=_json_safe(invocation.arguments),
                 receipt_id=receipt_id if isinstance(receipt_id, str) and receipt_id else None,
+                # The complete Schema V5 receipt of the allowed repair; _extract_receipt
+                # reads verdict["receipt"] first, then verdict["data"]["receipt"].
+                receipt=dict(receipt) if isinstance(receipt, Mapping) else None,
             )
             store.record_correction(exemplar)
         except Exception as error:  # noqa: BLE001

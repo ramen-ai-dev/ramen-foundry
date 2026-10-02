@@ -45,6 +45,7 @@ _EXEMPLAR_FIELDS = (
     "receipt_id",
     "created_at",
 )
+_SQLITE_COLUMNS = (*_EXEMPLAR_FIELDS, "receipt")
 
 
 def fingerprint_task(task: str) -> str:
@@ -72,6 +73,9 @@ class CorrectionExemplar:
     # equality, and the local stores; RemoteForgeMemoryStore sends it because
     # ramen forge requires task_fingerprint == SHA-256(task_description).
     task_description: str | None = field(default=None, compare=False, repr=False)
+    # Complete Schema V5 receipt from the ramen-ai evaluation of the repaired
+    # call. ramen forge verifies it and rejects records without one.
+    receipt: dict[str, Any] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         try:
@@ -111,6 +115,16 @@ class CorrectionExemplar:
                 raise ValueError("task_description must be None or a non-blank string")
             if fingerprint_task(self.task_description) != self.task_fingerprint:
                 raise ValueError("task_fingerprint does not match SHA-256(task_description)")
+        if self.receipt is not None:
+            if not isinstance(self.receipt, dict):
+                raise ValueError("receipt must be None or a dict")
+            try:
+                json.dumps(self.receipt)
+            except (TypeError, ValueError) as error:
+                raise ValueError("receipt must be JSON-serialisable") from error
+            receipt_key = self.receipt.get("id")
+            if receipt_key is not None and self.receipt_id is not None and receipt_key != self.receipt_id:
+                raise ValueError("receipt_id does not match receipt['id']")
 
     @classmethod
     def create(
@@ -124,6 +138,7 @@ class CorrectionExemplar:
         steering_directive: str,
         repaired_arguments: dict[str, Any],
         receipt_id: str | None,
+        receipt: dict[str, Any] | None = None,
     ) -> CorrectionExemplar:
         """Build an exemplar with a fresh UUID, task fingerprint, and UTC timestamp."""
         return cls(
@@ -138,16 +153,19 @@ class CorrectionExemplar:
             receipt_id=receipt_id,
             created_at=datetime.now(timezone.utc).isoformat(),
             task_description=task,
+            receipt=dict(receipt) if receipt is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible representation of the exemplar.
 
         ``task_description`` is deliberately excluded so local stores never
-        persist raw task text.
+        persist raw task text. ``receipt`` is included only when present.
         """
         data = asdict(self)
         data.pop("task_description")
+        if data["receipt"] is None:
+            data.pop("receipt")
         return data
 
     @classmethod
@@ -165,6 +183,7 @@ class CorrectionExemplar:
         return cls(
             **{name: data[name] for name in _EXEMPLAR_FIELDS},
             task_description=data.get("task_description"),
+            receipt=data.get("receipt"),
         )
 
 
@@ -305,7 +324,8 @@ class SQLiteMemoryStore(BaseEpisodicMemoryStore):
             steering_directive TEXT NOT NULL,
             repaired_arguments TEXT NOT NULL,
             receipt_id TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            receipt TEXT
         )
         """,
         """
@@ -325,6 +345,13 @@ class SQLiteMemoryStore(BaseEpisodicMemoryStore):
             with self._connection:
                 for statement in self._SCHEMA:
                     self._connection.execute(statement)
+                columns = {
+                    row[1]
+                    for row in self._connection.execute("PRAGMA table_info(correction_exemplars)")
+                }
+                if "receipt" not in columns:
+                    # Databases created by 0.2.0-0.2.2 predate the receipt column.
+                    self._connection.execute("ALTER TABLE correction_exemplars ADD COLUMN receipt TEXT")
         except sqlite3.Error:
             self._connection.close()
             self._connection = None
@@ -349,14 +376,15 @@ class SQLiteMemoryStore(BaseEpisodicMemoryStore):
             _encode_arguments(exemplar.repaired_arguments),
             exemplar.receipt_id,
             exemplar.created_at,
+            json.dumps(exemplar.receipt, sort_keys=True) if exemplar.receipt is not None else None,
         )
         with self._lock:
             connection = self._require_connection()
             try:
                 with connection:
                     connection.execute(
-                        f"INSERT INTO correction_exemplars ({', '.join(_EXEMPLAR_FIELDS)}) "
-                        f"VALUES ({', '.join('?' for _ in _EXEMPLAR_FIELDS)})",
+                        f"INSERT INTO correction_exemplars ({', '.join(_SQLITE_COLUMNS)}) "
+                        f"VALUES ({', '.join('?' for _ in _SQLITE_COLUMNS)})",
                         row,
                     )
             except sqlite3.IntegrityError as error:
@@ -373,16 +401,17 @@ class SQLiteMemoryStore(BaseEpisodicMemoryStore):
         _validate_limit(limit)
         with self._lock:
             rows = self._require_connection().execute(
-                f"SELECT {', '.join(_EXEMPLAR_FIELDS)} FROM correction_exemplars "
+                f"SELECT {', '.join(_SQLITE_COLUMNS)} FROM correction_exemplars "
                 "WHERE task_fingerprint = ? AND tool_name = ? "
                 "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (task_fingerprint, tool_name, limit),
             ).fetchall()
         exemplars: list[CorrectionExemplar] = []
         for row in rows:
-            record = dict(zip(_EXEMPLAR_FIELDS, row))
+            record = dict(zip(_SQLITE_COLUMNS, row))
             record["failed_arguments"] = json.loads(record["failed_arguments"])
             record["repaired_arguments"] = json.loads(record["repaired_arguments"])
+            record["receipt"] = json.loads(record["receipt"]) if record["receipt"] is not None else None
             exemplars.append(CorrectionExemplar.from_dict(record))
         return exemplars
 
@@ -531,6 +560,14 @@ class RemoteForgeMemoryStore(BaseEpisodicMemoryStore):
     def record_correction(self, exemplar: CorrectionExemplar) -> None:
         if not isinstance(exemplar, CorrectionExemplar):
             raise TypeError("exemplar must be a CorrectionExemplar")
+        if exemplar.receipt is None:
+            # ramen forge rejects receipt-less records with HTTP 422, so local or
+            # mock exemplars are skipped rather than sent.
+            logger.warning(
+                "ramen-foundry: exemplar %s has no Schema V5 receipt; skipping ramen forge upload",
+                exemplar.exemplar_id,
+            )
+            return
         if self.write_token is None:
             raise PermissionError("RemoteForgeMemoryStore is read-only: no write_token configured")
         if exemplar.task_description is None:
@@ -578,7 +615,12 @@ def _forge_error_detail(response: httpx.Response) -> str:
         return response.text[:200] or "no response body"
     if not isinstance(body, dict):
         return "unexpected response body"
-    detail = str(body.get("error") or "unknown error")
+    error = body.get("error")
+    if isinstance(error, dict):
+        # Receipt rejections use {"code": ..., "message": ...}.
+        detail = f"{error.get('code') or 'error'}: {error.get('message') or 'unknown error'}"
+    else:
+        detail = str(error or "unknown error")
     details = body.get("details")
     if isinstance(details, list) and details:
         detail += ": " + "; ".join(str(item) for item in details[:5])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from typing import Any
 from unittest import mock
 
@@ -16,9 +17,24 @@ BASE_URL = "https://forge.example.test"
 TASK = "Formulate an adverse action notice for credit application APP-99214."
 TOOL = "issue_credit_adverse_action"
 TOKEN = "forge-test-token"
+RECEIPT_ID = "8d1f2c4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
+RECEIPT: dict[str, Any] = {
+    "id": RECEIPT_ID,
+    "schema_version": "5.0",
+    "kid": "ramen_pk_v1",
+    "signature": "c2lnbmF0dXJl",
+    "canonical_payload": json.dumps({"id": RECEIPT_ID, "verdict": 1}),
+    "statutory_anchors": [],
+    "attestation": None,
+}
 
 
-def _exemplar(*, task: str = TASK, tool_name: str = TOOL) -> CorrectionExemplar:
+def _exemplar(
+    *,
+    task: str = TASK,
+    tool_name: str = TOOL,
+    receipt: dict[str, Any] | None = RECEIPT,
+) -> CorrectionExemplar:
     return CorrectionExemplar.create(
         task=task,
         tool_name=tool_name,
@@ -27,7 +43,8 @@ def _exemplar(*, task: str = TASK, tool_name: str = TOOL) -> CorrectionExemplar:
         primary_statutory_anchor="ECOA Regulation B",
         steering_directive="Use documented neutral creditworthiness factors.",
         repaired_arguments={"reg_b_reason_codes": ["INSUFFICIENT_LIQUIDITY"]},
-        receipt_id="rcpt-0001",
+        receipt_id=RECEIPT_ID if receipt is not None else None,
+        receipt=receipt,
     )
 
 
@@ -185,9 +202,33 @@ class RecordTests(unittest.TestCase):
                 "exemplar_id", "domain", "task_description", "task_fingerprint", "tool_name",
                 "failed_arguments", "violation_reason", "primary_statutory_anchor",
                 "steering_directive", "repaired_arguments", "receipt_id", "created_at",
+                "receipt",
             },
         )
         self.assertEqual(kwargs["json"]["task_fingerprint"], fingerprint_task(TASK))
+        self.assertEqual(kwargs["json"]["receipt"], RECEIPT)
+        self.assertEqual(kwargs["json"]["receipt_id"], RECEIPT["id"])
+        self.assertEqual(json.loads(json.dumps(kwargs["json"]))["receipt"], RECEIPT)
+
+    def test_exemplar_without_receipt_is_skipped_without_network(self) -> None:
+        with mock.patch("ramen_foundry.core.memory.httpx.post") as post:
+            with self.assertLogs("ramen_foundry.core.memory", level="WARNING") as logs:
+                self.store.record_correction(_exemplar(receipt=None))
+        post.assert_not_called()
+        self.assertIn("no Schema V5 receipt", logs.output[0])
+
+    def test_receipt_rejection_detail_is_reported(self) -> None:
+        rejected = _response(
+            422,
+            {
+                "success": False,
+                "error": {"code": "INVALID_CRYPTOGRAPHIC_RECEIPT", "message": "Exemplar rejected"},
+                "details": ["signed verdict is not 1 (the evaluated call was blocked)"],
+            },
+            "POST",
+        )
+        with self.assertRaisesRegex(RuntimeError, "INVALID_CRYPTOGRAPHIC_RECEIPT.*signed verdict is not 1"):
+            self.record(_exemplar(), rejected)
 
     def test_duplicate_409_is_ignored(self) -> None:
         self.record(_exemplar(), _response(409, {"success": False}, "POST"))
@@ -236,6 +277,23 @@ class ConstructorTests(unittest.TestCase):
         for timeout in (0, -1, True):
             with self.subTest(timeout=timeout), self.assertRaises(ValueError):
                 RemoteForgeMemoryStore(timeout_sec=timeout)
+
+
+class ReceiptFieldTests(unittest.TestCase):
+    def test_receipt_round_trips_through_dict_and_forge_record(self) -> None:
+        exemplar = _exemplar()
+        self.assertEqual(exemplar.to_dict()["receipt"], RECEIPT)
+        self.assertEqual(CorrectionExemplar.from_dict(exemplar.to_dict()).receipt, RECEIPT)
+        self.assertEqual(CorrectionExemplar.from_dict(_served(exemplar)).receipt, RECEIPT)
+
+    def test_missing_receipt_is_omitted_from_to_dict(self) -> None:
+        self.assertNotIn("receipt", _exemplar(receipt=None).to_dict())
+
+    def test_invalid_receipts_are_rejected(self) -> None:
+        exemplar = _exemplar()
+        for receipt in (["not", "a", "dict"], {"id": "other-id"}, {"blob": object()}):
+            with self.subTest(receipt=receipt), self.assertRaises(ValueError):
+                replace(exemplar, receipt=receipt)
 
 
 class TaskDescriptionTests(unittest.TestCase):

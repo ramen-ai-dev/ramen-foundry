@@ -295,6 +295,7 @@ def anchor(
         steering_directive=str(failed.get("steering") or violation.get("recovery_instruction") or ""),
         repaired_arguments=trajectory.repaired_arguments,
         receipt_id=str(receipt["id"]),
+        receipt=receipt,
     )
     oversized = [
         name for name, limit in FORGE_TEXT_LIMITS.items() if len(getattr(exemplar, name)) > limit

@@ -8,6 +8,9 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
+from unittest import mock
+
+import httpx
 
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
@@ -19,6 +22,7 @@ from ramen_foundry import (
     CorrectionExemplar,
     JSONFileMemoryStore,
     RamenSteerNode,
+    RemoteForgeMemoryStore,
     SQLiteMemoryStore,
     ToolInvocation,
 )
@@ -337,10 +341,28 @@ class RamenSteerNodeTests(unittest.TestCase):
             self.assertEqual(exemplar.primary_statutory_anchor, "UCC § 4A-202")
             self.assertEqual(exemplar.steering_directive, STEERING)
             self.assertEqual(exemplar.receipt_id, RECEIPT["id"])
+            self.assertEqual(exemplar.receipt, RECEIPT)
+            stored = json.loads(store.path.read_text(encoding="utf-8"))["exemplars"][0]
+            self.assertEqual(stored["receipt"], RECEIPT)
             self.assertEqual(
                 allowed.update["messages"][0].response_metadata["exemplar_id"],
                 exemplar.exemplar_id,
             )
+
+    def test_repair_transmits_full_receipt_to_forge(self) -> None:
+        store = RemoteForgeMemoryStore(base_url="https://forge.example.test", write_token="forge-test-token")
+        node = self.make_node(ScriptedClient(blocked_verdict(), allowed_verdict()), memory_store=store)
+        blocked = node(self.state(FAILED_ARGS))
+        created = httpx.Response(201, json={"success": True}, request=httpx.Request("POST", "https://forge.example.test"))
+        with mock.patch("ramen_foundry.core.memory.httpx.post", return_value=created) as post:
+            allowed = node(self.state(REPAIRED_ARGS, **carry(blocked.update)))
+
+        post.assert_called_once()
+        sent = post.call_args.kwargs["json"]
+        self.assertEqual(sent["receipt"], RECEIPT)
+        self.assertEqual(sent["receipt_id"], RECEIPT["id"])
+        self.assertEqual(sent["task_description"], TASK)
+        self.assertNotIn("memory_error", allowed.update["messages"][0].response_metadata)
 
     def test_first_pass_success_does_not_record_exemplar(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -450,6 +472,7 @@ class RamenSteerNodeTests(unittest.TestCase):
                         )
                         self.assertEqual(len(exemplars), 1)
                         self.assertEqual(exemplars[0].receipt_id, RECEIPT["id"])
+                        self.assertEqual(exemplars[0].receipt, RECEIPT)
             finally:
                 stores["sqlite"].close()
 
