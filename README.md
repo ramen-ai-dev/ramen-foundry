@@ -159,10 +159,12 @@ from ramen_foundry.core.memory import fingerprint_task
 
 forge = RemoteForgeMemoryStore(domain="fintech")  # read-only without write_token
 lessons = forge.retrieve_relevant_exemplars(fingerprint_task(task), "issue_credit_adverse_action")
+# Across phrasings: filter by tool and keyword instead of the exact task.
+lessons = lessons or forge.retrieve_relevant_exemplars(tool_name="issue_credit_adverse_action", query="ZIP")
 # Put lessons[0].steering_directive / repaired_arguments into the planner's context, then dispatch through RamenSteerNode.
 ```
 
-- **Reads** call `GET /api/v1/exemplars?domain=&tool_name=&task_fingerprint=&limit=` (limit 1–50). They fail open: timeouts, network or HTTP errors, and malformed responses are logged and return `[]`. Records that fail `CorrectionExemplar` validation or don't match the requested fingerprint and tool are skipped.
+- **Reads** call `GET /api/v1/exemplars`. `domain` and `limit` (1–50) are always sent. `tool_name`, `task_fingerprint`, and `query` (sent as `q`, up to 100 characters) are optional. `task_fingerprint` asks for an exact-task match. `query` is a keyword search over task descriptions, violation rules, and steering directives, so lessons are recalled even when the task is phrased differently. Reads fail open: timeouts, network or HTTP errors, and malformed responses are logged and return `[]`. Records that fail `CorrectionExemplar` validation, or that belong to another domain or requested tool, are skipped. A different task fingerprint alone does not exclude a record.
 - **Writes** call `POST /api/v1/exemplars` with `Authorization: Bearer <write_token>`. The body is `exemplar.to_dict()` plus `domain` and `task_description`. ramen forge requires `task_fingerprint == SHA-256(task_description)`, so exemplars built with `CorrectionExemplar.create(task=...)` (as `RamenSteerNode` does) keep their task text in memory for this purpose. Local stores never persist it. A duplicate `exemplar_id` (HTTP 409) is ignored. Other failures raise, and `RamenSteerNode` reports them as `memory_error` without losing the tool result. Without a `write_token`, the store is read-only and refuses writes.
 - `base_url` must be `https` (plain `http` is accepted only for `localhost`). The write token never appears in `repr()`.
 

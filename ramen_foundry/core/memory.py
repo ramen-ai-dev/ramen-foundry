@@ -407,6 +407,7 @@ class SQLiteMemoryStore(BaseEpisodicMemoryStore):
 
 _FORGE_EXEMPLARS_PATH = "/api/v1/exemplars"
 _FORGE_MAX_LIMIT = 50
+_FORGE_MAX_QUERY_LENGTH = 100
 _FORGE_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -417,9 +418,12 @@ class RemoteForgeMemoryStore(BaseEpisodicMemoryStore):
     Reads go to ``GET /api/v1/exemplars`` and are public. They fail open: a
     network error, timeout, HTTP error, or malformed response is logged and
     returns ``[]``, because memory is advisory and every call is still
-    evaluated by the ramen-ai policy boundary. Records that fail
-    :class:`CorrectionExemplar` validation, or that do not match the requested
-    ``task_fingerprint`` and ``tool_name``, are skipped.
+    evaluated by the ramen-ai policy boundary. Every filter except the store's
+    ``domain`` is optional: ``task_fingerprint`` asks for an exact-task match,
+    and ``query`` is a keyword search the forge runs over task descriptions,
+    violation rules, and steering directives, so lessons are recalled across
+    phrasings. Records that fail :class:`CorrectionExemplar` validation, or
+    that belong to a different domain or requested ``tool_name``, are skipped.
 
     Writes go to ``POST /api/v1/exemplars`` with ``Authorization: Bearer``. They
     require ``write_token`` and an exemplar that carries its
@@ -461,20 +465,30 @@ class RemoteForgeMemoryStore(BaseEpisodicMemoryStore):
 
     def retrieve_relevant_exemplars(
         self,
-        task_fingerprint: str,
-        tool_name: str,
+        task_fingerprint: str | None = None,
+        tool_name: str | None = None,
         limit: int = 3,
+        query: str | None = None,
     ) -> list[CorrectionExemplar]:
         _validate_limit(limit)
         if limit > _FORGE_MAX_LIMIT:
             raise ValueError(f"limit must be at most {_FORGE_MAX_LIMIT}")
         url = f"{self.base_url}{_FORGE_EXEMPLARS_PATH}"
-        params = {
-            "domain": self.domain,
-            "tool_name": tool_name,
-            "task_fingerprint": task_fingerprint,
-            "limit": str(limit),
-        }
+        params: dict[str, str] = {"domain": self.domain, "limit": str(limit)}
+        if tool_name is not None:
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ValueError("tool_name must be None or a non-blank string")
+            params["tool_name"] = tool_name
+        if task_fingerprint is not None:
+            if not isinstance(task_fingerprint, str) or not task_fingerprint.strip():
+                raise ValueError("task_fingerprint must be None or a non-blank string")
+            params["task_fingerprint"] = task_fingerprint
+        if query is not None:
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError("query must be None or a non-blank string")
+            if len(query.strip()) > _FORGE_MAX_QUERY_LENGTH:
+                raise ValueError(f"query must be at most {_FORGE_MAX_QUERY_LENGTH} characters")
+            params["q"] = query.strip()
         try:
             response = httpx.get(
                 url,
@@ -500,7 +514,12 @@ class RemoteForgeMemoryStore(BaseEpisodicMemoryStore):
             except (TypeError, ValueError) as error:
                 logger.warning("ramen-foundry: skipping invalid ramen forge exemplar: %s", error)
                 continue
-            if exemplar.task_fingerprint != task_fingerprint or exemplar.tool_name != tool_name:
+            # Fingerprints are deliberately not compared: a lesson recorded for a
+            # differently phrased task is still useful for the same tool and domain.
+            record_domain = record.get("domain")
+            if (tool_name is not None and exemplar.tool_name != tool_name) or (
+                record_domain is not None and record_domain != self.domain
+            ):
                 logger.warning(
                     "ramen-foundry: skipping ramen forge exemplar %s that does not match the query",
                     exemplar.exemplar_id,

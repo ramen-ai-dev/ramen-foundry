@@ -95,14 +95,57 @@ class RetrieveTests(unittest.TestCase):
     def test_invalid_or_mismatched_records_are_skipped(self) -> None:
         valid = _exemplar()
         bad_uuid = _served(_exemplar()) | {"exemplar_id": "not-a-uuid"}
-        wrong_task = _served(_exemplar(task="Some other task"))
         wrong_tool = _served(_exemplar(tool_name="dispatch_wire"))
+        wrong_domain = _served(_exemplar()) | {"domain": "industrial_iot"}
         tampered = _served(_exemplar()) | {"task_description": "Tampered description"}
-        body = {"exemplars": [bad_uuid, wrong_task, wrong_tool, tampered, _served(valid)]}
+        body = {"exemplars": [bad_uuid, wrong_tool, wrong_domain, tampered, _served(valid)]}
 
         with self.assertLogs("ramen_foundry.core.memory", level="WARNING"):
             retrieved, _ = self.retrieve(_response(200, body))
         self.assertEqual(retrieved, [valid])
+
+    def test_different_task_fingerprint_with_matching_tool_is_accepted(self) -> None:
+        rephrased = _exemplar(task="Draft the Reg B denial letter for APP-99214.")
+        self.assertNotEqual(rephrased.task_fingerprint, self.fingerprint)
+        body = {"exemplars": [_served(rephrased)]}
+        retrieved, _ = self.retrieve(_response(200, body))
+        self.assertEqual(retrieved, [rephrased])
+
+    def test_retrieval_without_task_fingerprint(self) -> None:
+        exemplar = _exemplar(task="Any phrasing of the adverse-action task")
+        body = {"exemplars": [_served(exemplar)]}
+        with mock.patch("ramen_foundry.core.memory.httpx.get") as get:
+            get.return_value = _response(200, body)
+            retrieved = self.store.retrieve_relevant_exemplars(tool_name=TOOL)
+        self.assertEqual(
+            get.call_args.kwargs["params"],
+            {"domain": "fintech", "limit": "3", "tool_name": TOOL},
+        )
+        self.assertEqual(retrieved, [exemplar])
+
+    def test_query_is_forwarded_as_q(self) -> None:
+        exemplar = _exemplar(task="Stage solvent canisters near the burner line.", tool_name="place_material")
+        body = {"exemplars": [_served(exemplar)]}
+        with mock.patch("ramen_foundry.core.memory.httpx.get") as get:
+            get.return_value = _response(200, body)
+            retrieved = self.store.retrieve_relevant_exemplars(query="burner")
+        self.assertEqual(get.call_args.kwargs["params"], {"domain": "fintech", "limit": "3", "q": "burner"})
+        self.assertEqual(retrieved, [exemplar])
+        url = httpx.Request("GET", get.call_args.args[0], params=get.call_args.kwargs["params"]).url
+        self.assertEqual(url.params["q"], "burner")
+
+    def test_invalid_optional_filters_are_rejected_without_network(self) -> None:
+        cases = [
+            {"query": "   "},
+            {"query": "x" * 101},
+            {"tool_name": ""},
+            {"task_fingerprint": ""},
+        ]
+        with mock.patch("ramen_foundry.core.memory.httpx.get") as get:
+            for kwargs in cases:
+                with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                    self.store.retrieve_relevant_exemplars(**kwargs)
+        get.assert_not_called()
 
     def test_limit_is_validated_and_enforced(self) -> None:
         for limit in (0, -1, True, 51):
