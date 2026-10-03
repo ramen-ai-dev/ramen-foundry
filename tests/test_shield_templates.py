@@ -15,6 +15,7 @@ from ramen_foundry import (
     ScoutShieldAgent,
     ToolInvocation,
 )
+from tests.receipt_fixtures import signed_data
 
 
 class FakeRamenClient:
@@ -45,6 +46,7 @@ class FakeRamenClient:
             "receipt_verified": self.receipt_verified,
             "receipt_reason": None if self.receipt_verified else "invalid signature",
             "steering": self.steering,
+            "data": signed_data(input_text, allowed=self.allowed),
         }
 
 

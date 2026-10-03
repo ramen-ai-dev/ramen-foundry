@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 
 from ramen_foundry import IndustrialAutomationAgent, ToolInvocation
 from ramen_foundry.templates import INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID
+from tests.receipt_fixtures import signed_data
 
 _OPERATING_ENVELOPES = {
     "ENV-CRACKER-Z3-STEADY": {
@@ -48,6 +49,7 @@ class IndustrialPolicyFakeClient:
             "receipt_verified": True,
             "receipt_reason": None,
             "steering": None if allowed else "Industrial safety invariant blocked actuation.",
+            "data": signed_data(input_text, allowed=allowed),
         }
 
     @staticmethod

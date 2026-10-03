@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 
 from ramen_foundry import CommercialLendingAgent, ToolInvocation
 from ramen_foundry.templates.fintech import FINTECH_BANKING_INVARIANCE_BUNDLE_ID
+from tests.receipt_fixtures import signed_data
 
 _SIGNING_KEY = Ed25519PrivateKey.from_private_bytes(
     bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
@@ -101,6 +102,7 @@ class PolicyAwareFakeRamenClient:
             "receipt_verified": True,
             "receipt_reason": None,
             "steering": None if allowed else "Required statutory evidence did not verify.",
+            "data": signed_data(input_text, allowed=allowed),
         }
 
     @staticmethod

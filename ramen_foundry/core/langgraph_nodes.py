@@ -16,6 +16,8 @@ from ramen_ai import (
     RamenClient,
 )
 
+from .receipts import signed_allow_problem
+
 
 class ToolInvocation(BaseModel):
     """A resolved tool call supplied by an LLM node to :class:`RamenToolNode`."""
@@ -45,12 +47,16 @@ class RamenToolNode:
         bundle_ids: Sequence[str] | None = None,
         provider_key: str | None = None,
         provider_name: str | None = None,
+        public_keys: Mapping[str, str] | None = None,
     ) -> None:
         if not policy_ids and not bundle_ids:
             raise ValueError("provide at least one policy_id or bundle_id")
         self._client = client
         self._tools = dict(tools)
         self._llm_node = llm_node
+        # Receipt verification keys; None means the SDK's production keys.
+        # Override only in tests.
+        self._public_keys = dict(public_keys) if public_keys is not None else None
         self._policy_ids = list(policy_ids) if policy_ids else None
         self._bundle_ids = list(bundle_ids) if bundle_ids else None
         self._provider_key = provider_key
@@ -72,11 +78,11 @@ class RamenToolNode:
                 invocation,
                 verdict.get("steering") or "Tool execution was blocked by ramen-ai policy.",
             )
-        if not verdict.get("receipt_verified", False):
-            reason = verdict.get("receipt_reason") or "No verifiable governance receipt was returned."
+        unverified = self._unverified_allow(invocation, verdict)
+        if unverified:
             return self._return_error(
                 invocation,
-                f"Tool execution was denied because the governance receipt could not be verified: {reason}",
+                f"Tool execution was denied because the governance receipt could not be verified: {unverified}",
             )
 
         tool = self._tools.get(invocation.name)
@@ -109,14 +115,31 @@ class RamenToolNode:
             goto=self._llm_node,
         )
 
-    def _evaluate(self, invocation: ToolInvocation) -> dict[str, Any]:
-        """Evaluate one resolved tool call through the ramen-ai SDK."""
-        payload = json.dumps(
+    @staticmethod
+    def _payload(invocation: ToolInvocation) -> str:
+        """Return the exact string evaluated (and hash-bound by the receipt)."""
+        return json.dumps(
             {"tool": invocation.name, "arguments": invocation.arguments},
             sort_keys=True,
             separators=(",", ":"),
             default=str,
         )
+
+    def _unverified_allow(self, invocation: ToolInvocation, verdict: Mapping[str, Any]) -> str | None:
+        """Return why an ALLOW verdict may not release the tool, or None.
+
+        Requires the client's own ``receipt_verified`` and, independently, a
+        receipt whose signature, input binding, and signed verdict (1) verify
+        locally. The second check means dispatch never rests on a flag the
+        client sets: a replayed, validly signed BLOCK receipt is refused.
+        """
+        if not verdict.get("receipt_verified", False):
+            return verdict.get("receipt_reason") or "No verifiable governance receipt was returned."
+        return signed_allow_problem(verdict, self._payload(invocation), self._public_keys)
+
+    def _evaluate(self, invocation: ToolInvocation) -> dict[str, Any]:
+        """Evaluate one resolved tool call through the ramen-ai SDK."""
+        payload = self._payload(invocation)
         return self._client.evaluate_compliance(
             payload,
             policy_ids=self._policy_ids,
@@ -134,6 +157,7 @@ class RamenToolNode:
                         content=f"Governance blocked tool execution: {reason}",
                         tool_call_id=invocation.tool_call_id,
                         name=invocation.name,
+                        status="error",
                     )
                 ],
                 "governance_error": reason,

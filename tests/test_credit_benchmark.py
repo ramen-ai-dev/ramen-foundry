@@ -17,6 +17,7 @@ from examples.benchmark_credit_data import (
 )
 from ramen_foundry import CommercialLendingAgent
 from ramen_foundry.templates.fintech import FINTECH_BANKING_INVARIANCE_BUNDLE_ID
+from tests.receipt_fixtures import signed_data
 
 
 class BenchmarkPolicyFakeClient:
@@ -38,7 +39,6 @@ class BenchmarkPolicyFakeClient:
             and set(arguments["reg_b_reason_codes"]) == negative_reasons
         )
         steering = None if allowed else "Use principal reasons grounded in model attribution."
-        canonical_payload = json.dumps({"verdict": 1 if allowed else 0})
         return {
             "allowed": allowed,
             "receipt_verified": True,
@@ -48,11 +48,7 @@ class BenchmarkPolicyFakeClient:
             "policy_ids": ["credit-policy-id"],
             "data": {
                 "statutory_anchors": ["12 C.F.R. § 1002.9"],
-                "receipt": {
-                    "kid": "test-kid",
-                    "signature": "test-signature",
-                    "canonical_payload": canonical_payload,
-                },
+                **signed_data(input_text, allowed=allowed, kid="test-kid"),
             },
         }
 

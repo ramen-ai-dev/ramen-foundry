@@ -11,6 +11,7 @@ from examples.simulate_robotics_3d import (
     build_simulation_scenarios,
     run_governed_scene,
 )
+from tests.receipt_fixtures import signed_data
 
 
 class SimulationPolicyFakeClient:
@@ -28,11 +29,7 @@ class SimulationPolicyFakeClient:
             "receipt_valid": True,
             "steering": None if allowed else "De-energize and isolate before tool insertion.",
             "data": {
-                "receipt": {
-                    "kid": "test-ed25519-kid",
-                    "signature": "test-signature",
-                    "canonical_payload": json.dumps({"verdict": 1 if allowed else 0}),
-                }
+                **signed_data(input_text, allowed=allowed, kid="test-ed25519-kid")
             },
         }
         self.evaluations.append(result)

@@ -79,6 +79,7 @@ class RamenSteerNode(RamenToolNode):
         max_repair_turns: int = 2,
         task_key: str = "task",
         domain: str | None = None,
+        public_keys: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(
             client=client,
@@ -88,6 +89,7 @@ class RamenSteerNode(RamenToolNode):
             bundle_ids=bundle_ids,
             provider_key=provider_key,
             provider_name=provider_name,
+            public_keys=public_keys,
         )
         if (
             isinstance(max_repair_turns, bool)
@@ -143,8 +145,10 @@ class RamenSteerNode(RamenToolNode):
         if not verdict.get("allowed", False):
             return self._steer(invocation, verdict, repair_turns)
 
-        if not verdict.get("receipt_verified", False):
-            reason = verdict.get("receipt_reason") or "No verifiable governance receipt was returned."
+        unverified = self._unverified_allow(invocation, verdict)
+        if unverified:
+            # Fail closed without a repair turn: this is missing evidence, not a policy block.
+            reason = unverified
             return self._halt(
                 invocation,
                 "Tool execution was denied because the governance receipt could not be "

@@ -504,6 +504,7 @@ A host tool is invoked only after all pre-execution conditions hold:
 - The semantic verdict is affirmative.
 - The V5 receipt is present and cryptographically verified.
 - The receipt's SHA-256 input binding matches the canonical action payload.
+- The *signed* payload records `verdict: 1` (ALLOW). This is checked by the node itself from the receipt bytes, not taken from the client's `allowed` or `receipt_verified` flags.
 - The tool name is registered for that template.
 
 For a valid invocation, governance and tool outcomes return an explicit `governance_error` on failure. Missing or malformed invocation state raises validation before evaluation and cannot execute a capability. Once an approved host tool begins, however, an exception may represent a partial side effect; inspect operation evidence before retrying.
@@ -511,6 +512,8 @@ For a valid invocation, governance and tool outcomes return an explicit `governa
 ### Ed25519 cryptographic receipts
 
 `ramen-ai-core` verifies Ed25519 signatures and input hash binding locally. Receipts bind the verdict to the exact canonical input, resolved policy UUIDs, violations, statutory/control anchors, execution time, and outcome. Foundry requires `receipt_verified=True`; an unsigned or unverifiable allow is treated as a denial.
+
+Since 0.2.4, `RamenToolNode` and `RamenSteerNode` also re-verify every ALLOW independently before dispatch: the Ed25519 signature over `canonical_payload` under the pinned `ramen_pk_v1` key, the signed `schema_version`, `kid`, and `id`, the `payload_hash` binding to the evaluated tool call, and a signed `verdict` of `1`. Tool nodes accept any client object, so this keeps dispatch from resting on flags a wrapper, custom client, or tampered result could set. A genuine, validly signed BLOCK receipt returned with `allowed` flipped to `true` is refused, and so is an ALLOW receipt replayed from a different call. Each failure returns an error `ToolMessage`; `RamenSteerNode` routes it to `halt_node` without a repair turn and records no exemplar. `@ramen-ai/mcp-shield-proxy` 0.1.4 enforces the same gate.
 
 ### Defence in depth
 
@@ -552,6 +555,7 @@ from ramen_foundry import (
 | Python | `>=3.10` |
 | `ramen-ai-core` | `>=0.3.2,<0.4.0` |
 | `httpx` | `>=0.27.0,<1.0.0` |
+| `cryptography` | `>=42.0.0` |
 | `langgraph` | `==1.2.11` |
 | `langchain-core` | `==1.6.0` |
 | `pydantic` | `==2.13.4` |

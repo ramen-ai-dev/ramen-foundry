@@ -20,6 +20,7 @@ from examples.benchmark_asimov_robotics import (
 )
 from ramen_foundry import IndustrialAutomationAgent
 from ramen_foundry.templates import INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID
+from tests.receipt_fixtures import signed_data
 
 
 class BenchmarkPolicyFakeClient:
@@ -47,11 +48,7 @@ class BenchmarkPolicyFakeClient:
             "receipt_reason": None,
             "steering": steering_by_scene.get(arguments["scene_context_id"]),
             "data": {
-                "receipt": {
-                    "kid": "test-ed25519-kid",
-                    "signature": "test-signature",
-                    "canonical_payload": json.dumps({"verdict": 1 if allowed else 0}),
-                }
+                **signed_data(input_text, allowed=allowed, kid="test-ed25519-kid")
             },
         }
         self.evaluations.append(result)

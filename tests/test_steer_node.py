@@ -28,22 +28,17 @@ from ramen_foundry import (
     ToolInvocation,
 )
 from ramen_foundry.core.memory import fingerprint_task
+from tests.receipt_fixtures import sign_receipt, tool_payload
 
 TASK = "Wire $150,000 to Harbor Equipment LLC"
 BUNDLE_ID = "ramen__fintech_banking_invariance"
 ANCHORS = ["UCC § 4A-202", "31 CFR § 1010.410(f)", "FFIEC BSA/AML Manual"]
 STEERING = "Obtain and attach an Ed25519 co-signer signature before dispatching."
-RECEIPT = {
-    "id": "rcpt-7f3a",
-    "schema_version": "5",
-    "kid": "ramen-ed25519-2026-09",
-    "signature": "c2lnbmF0dXJl",
-    "canonical_payload": '{"allowed":true}',
-    "statutory_anchors": [],
-    "attestation": None,
-}
 FAILED_ARGS = {"account_id": "acct-1", "amount_usd": 150000.0}
 REPAIRED_ARGS = {**FAILED_ARGS, "co_signer_signature": "ed25519:ab"}
+# Genuinely signed receipts bound to the exact payload RamenSteerNode evaluates.
+RECEIPT = sign_receipt(tool_payload("dispatch_wire", REPAIRED_ARGS), verdict=1, receipt_id="rcpt-7f3a")
+BLOCK_RECEIPT = sign_receipt(tool_payload("dispatch_wire", FAILED_ARGS), verdict=0, receipt_id="rcpt-block")
 
 
 def blocked_verdict(
@@ -75,12 +70,22 @@ def blocked_verdict(
             ],
             "results": [],
             "statutory_anchors": ANCHORS if anchors is None else anchors,
-            "receipt": {**RECEIPT, "id": "rcpt-block"},
+            "receipt": dict(BLOCK_RECEIPT),
         },
     }
 
 
-def allowed_verdict(*, receipt_verified: bool = True) -> dict[str, Any]:
+def allowed_verdict(
+    *,
+    receipt_verified: bool = True,
+    tool: str | None = None,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    receipt = (
+        sign_receipt(tool_payload(tool or "dispatch_wire", arguments or {}), verdict=1)
+        if tool is not None or arguments is not None
+        else dict(RECEIPT)
+    )
     return {
         "allowed": True,
         "receipt_verified": receipt_verified,
@@ -95,7 +100,7 @@ def allowed_verdict(*, receipt_verified: bool = True) -> dict[str, Any]:
             "total_violations": [],
             "results": [],
             "statutory_anchors": [],
-            "receipt": dict(RECEIPT),
+            "receipt": receipt,
         },
     }
 
@@ -269,7 +274,9 @@ class RamenSteerNodeTests(unittest.TestCase):
 
     def test_top_level_receipt_takes_precedence(self) -> None:
         verdict = allowed_verdict()
-        verdict["receipt"] = {**RECEIPT, "id": "rcpt-top-level"}
+        verdict["receipt"] = sign_receipt(
+            tool_payload("dispatch_wire", REPAIRED_ARGS), verdict=1, receipt_id="rcpt-top-level"
+        )
         command = self.make_node(ScriptedClient(verdict))(self.state(REPAIRED_ARGS))
         self.assertEqual(
             command.update["messages"][0].response_metadata["receipt"]["id"],
@@ -295,12 +302,59 @@ class RamenSteerNodeTests(unittest.TestCase):
                 self.assertEqual(command.update["messages"][0].status, "error")
         self.assertEqual(self.executions, [])
 
+    # -- Signed-ALLOW verification ---------------------------------------------
+
+    def forged(self, receipt: dict[str, Any] | None) -> dict[str, Any]:
+        """allowed and receipt_verified claim success around the given receipt."""
+        result = allowed_verdict()
+        result["data"]["receipt"] = receipt
+        return result
+
+    def assert_forgery_halted(self, command: Any, reason: str) -> None:
+        self.assertEqual(self.executions, [], "the host tool must not run")
+        self.assertEqual(command.goto, END)  # fail closed, no repair turn
+        self.assertIn("could not be verified", command.update["governance_error"])
+        self.assertIn(reason, command.update["governance_error"])
+        self.assertEqual(command.update["messages"][0].status, "error")
+        self.assertNotIn("pending_correction", command.update)
+
+    def test_genuine_signed_allow_executes(self) -> None:
+        command = self.make_node(ScriptedClient(allowed_verdict()))(self.state(REPAIRED_ARGS))
+        self.assertEqual(len(self.executions), 1)
+        self.assertIsNone(command.update["governance_error"])
+
+    def test_replayed_signed_block_receipt_halts_without_dispatch(self) -> None:
+        block = sign_receipt(tool_payload("dispatch_wire", REPAIRED_ARGS), verdict=0)
+        command = self.make_node(ScriptedClient(self.forged(block)))(self.state(REPAIRED_ARGS))
+        self.assert_forgery_halted(command, "signed verdict is 0")
+
+    def test_invalidated_signature_halts_without_dispatch(self) -> None:
+        receipt = dict(RECEIPT)
+        receipt["canonical_payload"] = receipt["canonical_payload"].replace('"verdict":1', '"verdict":1 ')
+        command = self.make_node(ScriptedClient(self.forged(receipt)))(self.state(REPAIRED_ARGS))
+        self.assert_forgery_halted(command, "signature does not verify")
+
+    def test_missing_receipt_halts_without_dispatch(self) -> None:
+        command = self.make_node(ScriptedClient(self.forged(None)))(self.state(REPAIRED_ARGS))
+        self.assert_forgery_halted(command, "no Schema V5 receipt")
+
+    def test_forged_repair_is_not_recorded_to_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = JSONFileMemoryStore(Path(directory) / "agent_memory.json")
+            block = sign_receipt(tool_payload("dispatch_wire", REPAIRED_ARGS), verdict=0)
+            node = self.make_node(ScriptedClient(blocked_verdict(), self.forged(block)), memory_store=store)
+            blocked = node(self.state(FAILED_ARGS))
+            command = node(self.state(REPAIRED_ARGS, **carry(blocked.update)))
+            self.assert_forgery_halted(command, "signed verdict is 0")
+            self.assertFalse(store.path.exists())
+
     def test_unregistered_tool_halts(self) -> None:
         state = self.state(FAILED_ARGS)
         state["tool_invocation"] = ToolInvocation(
             name="delete_ledger", arguments={}, tool_call_id="call-x"
         )
-        command = self.make_node(ScriptedClient(allowed_verdict()))(state)
+        verdict = allowed_verdict(tool="delete_ledger", arguments={})
+        command = self.make_node(ScriptedClient(verdict))(state)
         self.assertEqual(command.goto, END)
         self.assertIn("not registered", command.update["governance_error"])
 

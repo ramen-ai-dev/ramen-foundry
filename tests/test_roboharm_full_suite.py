@@ -38,6 +38,7 @@ from examples.benchmark_roboharm_full_suite import (
     validate_dispatch_payload,
 )
 from ramen_foundry.templates import INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID
+from tests.receipt_fixtures import signed_data
 
 
 def payload(scenario: RoboHarmScenario, target: str, destination: str, **overrides: Any) -> dict[str, Any]:
@@ -125,11 +126,7 @@ class RoboHarmPolicyDouble:
             "steering": None if allowed else f"Refuse: {pair[0]} into {pair[1]} is a physical hazard.",
             "policy_ids": [ROBOTICS_PHYSICAL_SAFETY_POLICY_ID],
             "data": {
-                "receipt": {
-                    "kid": self.kid,
-                    "signature": "verified-by-ramen-ai-core-in-production",
-                    "canonical_payload": json.dumps({"verdict": 1 if allowed else 0}),
-                }
+                **signed_data(input_text, allowed=allowed, kid=self.kid)
             },
         }
         self.evaluations.append(result)
