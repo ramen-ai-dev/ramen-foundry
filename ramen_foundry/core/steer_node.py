@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import urlencode
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
@@ -14,7 +15,7 @@ from langgraph.types import Command
 from ramen_ai import RamenClient
 
 from .langgraph_nodes import RamenToolNode, ToolInvocation, _stringify
-from .memory import BaseEpisodicMemoryStore, CorrectionExemplar
+from .memory import BaseEpisodicMemoryStore, CorrectionExemplar, RemoteForgeMemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,9 @@ _REPLAN_INSTRUCTION = (
 _DEFAULT_RULE_ID = "UNSPECIFIED_RULE"
 _DEFAULT_REASON = "Blocked by ramen-ai policy."
 _DEFAULT_STEERING = "Revise the tool call so that it satisfies the governing policy."
+PROVENANCE_KEY = "_ramen_provenance"
+PROVENANCE_VERSION = "1.0"
+DEFAULT_DOMAIN = "general"
 
 
 class RamenSteerNode(RamenToolNode):
@@ -74,6 +78,7 @@ class RamenSteerNode(RamenToolNode):
         memory_store: BaseEpisodicMemoryStore | None = None,
         max_repair_turns: int = 2,
         task_key: str = "task",
+        domain: str | None = None,
     ) -> None:
         super().__init__(
             client=client,
@@ -98,6 +103,14 @@ class RamenSteerNode(RamenToolNode):
         self._memory_store = memory_store
         self._max_repair_turns = max_repair_turns
         self._task_key = task_key
+        if domain is not None and (not isinstance(domain, str) or not domain.strip()):
+            raise ValueError("domain must be None or a non-blank string")
+        # Falls back to the bound forge store's domain, then to "general".
+        self.domain = (
+            domain.strip()
+            if domain
+            else str(getattr(memory_store, "domain", None) or DEFAULT_DOMAIN)
+        )
 
     @property
     def memory_store(self) -> BaseEpisodicMemoryStore | None:
@@ -163,13 +176,21 @@ class RamenSteerNode(RamenToolNode):
             "policy_ids": list(verdict.get("policy_ids") or []),
         }
         pending = state.get("pending_correction")
+        exemplar: CorrectionExemplar | None = None
         if (
             self._memory_store is not None
             and task is not None
             and isinstance(pending, Mapping)
             and pending.get("tool_name") == invocation.name
         ):
-            self._record_repair(task, invocation, pending, receipt, metadata)
+            exemplar = self._record_repair(task, invocation, pending, receipt, metadata)
+        metadata[PROVENANCE_KEY] = build_provenance(
+            domain=self.domain,
+            tool_name=invocation.name,
+            exemplar=exemplar,
+            receipt=receipt,
+            store=self._memory_store,
+        )
 
         return Command(
             update={
@@ -283,10 +304,11 @@ class RamenSteerNode(RamenToolNode):
         pending: Mapping[str, Any],
         receipt: Mapping[str, Any] | None,
         metadata: dict[str, Any],
-    ) -> None:
+    ) -> CorrectionExemplar | None:
+        """Record the repair; return the exemplar, or None if it was not saved."""
         store = self._memory_store
         if store is None:
-            return
+            return None
         receipt_id = receipt.get("id") if isinstance(receipt, Mapping) else None
         try:
             exemplar = CorrectionExemplar.create(
@@ -310,8 +332,56 @@ class RamenSteerNode(RamenToolNode):
             # raising and losing the tool result.
             logger.error("ramen-foundry: failed to record correction exemplar: %s", error)
             metadata["memory_error"] = f"Failed to record correction exemplar: {error}"
-            return
+            return None
         metadata["exemplar_id"] = exemplar.exemplar_id
+        return exemplar
+
+
+def build_provenance(
+    *,
+    domain: str,
+    tool_name: str,
+    exemplar: CorrectionExemplar | None,
+    receipt: Mapping[str, Any] | None,
+    store: BaseEpisodicMemoryStore | None,
+) -> dict[str, Any]:
+    """Build the ``_ramen_provenance`` envelope for ``ToolMessage.response_metadata``.
+
+    The envelope is flat, JSON-serialisable, and contains only identifiers and
+    short text, so observability tools (LangSmith, Braintrust, OpenTelemetry)
+    can index it without extra handling. Lesson fields are ``None`` when no
+    exemplar is involved, for example a call allowed on its first attempt.
+
+    ``source`` names where the lesson lives: ``"ramen-forge"`` for a
+    :class:`RemoteForgeMemoryStore`, otherwise ``"ramen-foundry-local"``.
+    ``audit_uri`` is set only for forge-backed exemplars; it is a filtered
+    listing (domain, tool, task fingerprint) because ramen forge cannot look a
+    record up by ``exemplar_id``, and the stored id can differ from the one
+    generated locally when the forge refreshes an existing lesson.
+    """
+    on_forge = exemplar is not None and isinstance(store, RemoteForgeMemoryStore)
+    audit_uri: str | None = None
+    if on_forge and isinstance(store, RemoteForgeMemoryStore) and exemplar is not None:
+        query = urlencode(
+            {
+                "domain": store.domain,
+                "tool_name": exemplar.tool_name,
+                "task_fingerprint": exemplar.task_fingerprint,
+            }
+        )
+        audit_uri = f"{store.base_url}/api/v1/exemplars?{query}"
+    receipt_id = receipt.get("id") if isinstance(receipt, Mapping) else None
+    return {
+        "source": "ramen-forge" if isinstance(store, RemoteForgeMemoryStore) else "ramen-foundry-local",
+        "version": PROVENANCE_VERSION,
+        "domain": domain,
+        "tool_name": tool_name,
+        "exemplar_id": exemplar.exemplar_id if exemplar else None,
+        "statutory_anchor": exemplar.primary_statutory_anchor if exemplar else None,
+        "receipt_id": receipt_id if isinstance(receipt_id, str) and receipt_id else None,
+        "prevention_summary": exemplar.steering_directive if exemplar else None,
+        "audit_uri": audit_uri,
+    }
 
 
 def primary_statutory_anchor(anchors: Any) -> str:

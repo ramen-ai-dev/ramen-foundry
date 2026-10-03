@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
@@ -363,6 +364,83 @@ class RamenSteerNodeTests(unittest.TestCase):
         self.assertEqual(sent["receipt_id"], RECEIPT["id"])
         self.assertEqual(sent["task_description"], TASK)
         self.assertNotIn("memory_error", allowed.update["messages"][0].response_metadata)
+
+    # -- _ramen_provenance envelope -------------------------------------------
+
+    PROVENANCE_KEYS = {
+        "source", "version", "domain", "tool_name", "exemplar_id", "statutory_anchor",
+        "receipt_id", "prevention_summary", "audit_uri",
+    }
+
+    def test_provenance_is_attached_to_allowed_tool_message(self) -> None:
+        command = self.make_node(ScriptedClient(allowed_verdict()))(self.state(REPAIRED_ARGS))
+        provenance = command.update["messages"][0].response_metadata["_ramen_provenance"]
+
+        self.assertEqual(set(provenance), self.PROVENANCE_KEYS)
+        self.assertEqual(provenance["version"], "1.0")
+        self.assertEqual(provenance["domain"], "general")
+        self.assertEqual(provenance["tool_name"], "dispatch_wire")
+        self.assertEqual(provenance["receipt_id"], RECEIPT["id"])
+        self.assertEqual(provenance["source"], "ramen-foundry-local")
+        for lesson_field in ("exemplar_id", "statutory_anchor", "prevention_summary", "audit_uri"):
+            self.assertIsNone(provenance[lesson_field])
+        json.dumps(provenance)  # must be serialisable for LangSmith / OpenTelemetry
+
+    def test_provenance_carries_recorded_exemplar_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = JSONFileMemoryStore(Path(directory) / "agent_memory.json")
+            node = self.make_node(ScriptedClient(blocked_verdict(), allowed_verdict()), memory_store=store)
+            blocked = node(self.state(FAILED_ARGS))
+            allowed = node(self.state(REPAIRED_ARGS, **carry(blocked.update)))
+
+        metadata = allowed.update["messages"][0].response_metadata
+        provenance = metadata["_ramen_provenance"]
+        self.assertEqual(provenance["exemplar_id"], metadata["exemplar_id"])
+        self.assertEqual(provenance["statutory_anchor"], "UCC § 4A-202")
+        self.assertEqual(provenance["prevention_summary"], STEERING)
+        self.assertEqual(provenance["receipt_id"], RECEIPT["id"])
+        self.assertEqual(provenance["source"], "ramen-foundry-local")
+        self.assertIsNone(provenance["audit_uri"])  # a local exemplar has no public page
+
+    def test_provenance_for_forge_exemplar_links_to_a_working_filter(self) -> None:
+        store = RemoteForgeMemoryStore(base_url="https://forge.example.test", write_token="forge-test-token", domain="fintech")
+        node = self.make_node(ScriptedClient(blocked_verdict(), allowed_verdict()), memory_store=store)
+        blocked = node(self.state(FAILED_ARGS))
+        created = httpx.Response(201, json={"success": True}, request=httpx.Request("POST", "https://forge.example.test"))
+        with mock.patch("ramen_foundry.core.memory.httpx.post", return_value=created):
+            allowed = node(self.state(REPAIRED_ARGS, **carry(blocked.update)))
+
+        provenance = allowed.update["messages"][0].response_metadata["_ramen_provenance"]
+        self.assertEqual(provenance["source"], "ramen-forge")
+        self.assertEqual(provenance["domain"], "fintech")  # taken from the forge store
+        link = urlsplit(provenance["audit_uri"])
+        self.assertEqual(f"{link.scheme}://{link.netloc}{link.path}", "https://forge.example.test/api/v1/exemplars")
+        # ramen forge cannot look records up by exemplar_id or search it with q,
+        # so the link filters on fields the forge does support.
+        self.assertEqual(
+            parse_qs(link.query),
+            {"domain": ["fintech"], "tool_name": ["dispatch_wire"], "task_fingerprint": [fingerprint_task(TASK)]},
+        )
+        self.assertNotIn(provenance["exemplar_id"], provenance["audit_uri"])
+
+    def test_explicit_domain_overrides_store_domain(self) -> None:
+        store = RemoteForgeMemoryStore(base_url="https://forge.example.test", domain="fintech")
+        node = self.make_node(ScriptedClient(allowed_verdict()), memory_store=store, domain="industrial_iot")
+        command = node(self.state(REPAIRED_ARGS))
+        self.assertEqual(command.update["messages"][0].response_metadata["_ramen_provenance"]["domain"], "industrial_iot")
+        for domain in ("", "  ", 7):
+            with self.subTest(domain=domain), self.assertRaises(ValueError):
+                self.make_node(ScriptedClient(allowed_verdict()), domain=domain)
+
+    def test_provenance_omits_lesson_when_exemplar_was_not_saved(self) -> None:
+        node = self.make_node(ScriptedClient(blocked_verdict(), allowed_verdict()), memory_store=FailingStore())
+        blocked = node(self.state(FAILED_ARGS))
+        with self.assertLogs("ramen_foundry.core.steer_node", level="ERROR"):
+            allowed = node(self.state(REPAIRED_ARGS, **carry(blocked.update)))
+        provenance = allowed.update["messages"][0].response_metadata["_ramen_provenance"]
+        self.assertIsNone(provenance["exemplar_id"])
+        self.assertIsNone(provenance["audit_uri"])
+        self.assertEqual(provenance["receipt_id"], RECEIPT["id"])
 
     def test_first_pass_success_does_not_record_exemplar(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

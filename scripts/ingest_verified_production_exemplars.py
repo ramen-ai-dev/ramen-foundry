@@ -24,8 +24,19 @@ Two scenario kinds:
     ``failed_arguments`` is empty, ``violation_reason`` states that plainly, and
     the anchor and guidance text are curated in this file (marked as such).
 
-Scenarios that ramen forge already holds with a receipt (same task and tool)
-are skipped, so re-running does not add duplicates.
+Records are stored keyed on (domain, tool, task fingerprint, violation text), and
+ramen forge upserts: posting the same lesson again refreshes only its receipt,
+signature, and canonical payload. Per scenario this script therefore:
+
+* skips a lesson that already carries a signature and canonical payload;
+* **backfills** a lesson stored without them (ingested before the forge kept
+  signatures) by evaluating the *stored* repaired arguments, so the new receipt
+  covers exactly what the forge holds, and re-posting the stored lesson text;
+* otherwise creates the lesson.
+
+After every post it reads the record back and checks that the signature and
+canonical payload are present, that the receipt id matches, and that the
+signature verifies offline under the pinned ``ramen_pk_v1`` key.
 
 Run from the repository root::
 
@@ -54,6 +65,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from ramen_ai import RamenClient
 from ramen_ai.verifier import AUDIT_PUBLIC_KEYS
 
@@ -249,7 +262,7 @@ class Result:
 
     @property
     def ok(self) -> bool:
-        return self.status in {"201 CREATED", "ALREADY PRESENT", "VERIFIED (dry run)"}
+        return self.status in {"CREATED", "BACKFILLED", "ALREADY SIGNED", "VERIFIED (dry run)"}
 
 
 def load_credentials() -> dict[str, str]:
@@ -323,9 +336,44 @@ def verified_allow_receipt(verdict: Mapping[str, Any]) -> tuple[dict[str, Any] |
     return receipt, ""
 
 
-def already_present(store: RemoteForgeMemoryStore, scenario: Scenario) -> CorrectionExemplar | None:
-    records = store.retrieve_relevant_exemplars(fingerprint_task(scenario.task_description), scenario.tool_name, limit=50)
-    return next((r for r in records if r.receipt_id and r.task_description == scenario.task_description), None)
+def fetch_stored(forge_url: str, scenario: Scenario) -> dict[str, Any] | None:
+    """Return the raw forge record for this scenario's task, or None if absent."""
+    response = httpx.get(
+        f"{forge_url.rstrip('/')}/api/v1/exemplars",
+        params={
+            "domain": scenario.domain,
+            "tool_name": scenario.tool_name,
+            "task_fingerprint": fingerprint_task(scenario.task_description),
+            "limit": "50",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    records = response.json().get("exemplars") or []
+    return next((r for r in records if r.get("task_description") == scenario.task_description), None)
+
+
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def signature_problem(record: Mapping[str, Any], receipt_id: str) -> str | None:
+    """Return why a forge record's stored proof is unusable, or None if it verifies offline."""
+    signature, canonical = record.get("signature"), record.get("canonical_payload")
+    if not signature or not canonical:
+        return "signature or canonical_payload is missing"
+    if record.get("receipt_id") != receipt_id:
+        return f"stored receipt_id {record.get('receipt_id')!r} is not {receipt_id!r}"
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(RAMEN_PK_V1_RAW_HEX)).verify(
+            _b64url_decode(signature), canonical.encode("utf-8")
+        )
+        signed = json.loads(canonical)
+    except (InvalidSignature, ValueError):
+        return "stored signature does not verify against canonical_payload under ramen_pk_v1"
+    if not isinstance(signed, dict) or signed.get("id") != receipt_id or signed.get("verdict") != VERDICT_ALLOWED:
+        return "stored canonical_payload does not describe this ALLOW receipt"
+    return None
 
 
 def build_exemplar(scenario: Scenario, receipt: dict[str, Any], allowed: Mapping[str, Any], failed: Mapping[str, Any] | None) -> CorrectionExemplar:
@@ -354,13 +402,42 @@ def build_exemplar(scenario: Scenario, receipt: dict[str, Any], allowed: Mapping
     )
 
 
-def ingest(client: RamenClient, scenario: Scenario, provider: Mapping[str, str], store: RemoteForgeMemoryStore, dry_run: bool) -> Result:
-    existing = already_present(store, scenario)
-    if existing is not None:
-        return Result(scenario, "ALREADY PRESENT", f"exemplar {existing.exemplar_id}", existing.receipt_id)
+def backfill_exemplar(scenario: Scenario, stored: Mapping[str, Any], receipt: dict[str, Any]) -> CorrectionExemplar:
+    """Re-post a stored lesson verbatim (its text is the upsert key) with a fresh receipt."""
+    return CorrectionExemplar.create(
+        task=scenario.task_description,
+        tool_name=scenario.tool_name,
+        failed_arguments=dict(stored.get("failed_arguments") or {}),
+        violation_reason=str(stored["violation_reason"]),
+        primary_statutory_anchor=str(stored["primary_statutory_anchor"]),
+        steering_directive=str(stored["steering_directive"]),
+        repaired_arguments=dict(stored["repaired_arguments"]),
+        receipt_id=str(receipt["id"]),
+        receipt=receipt,
+    )
+
+
+def ingest(
+    client: RamenClient,
+    scenario: Scenario,
+    provider: Mapping[str, str],
+    store: RemoteForgeMemoryStore,
+    dry_run: bool,
+) -> Result:
     try:
-        failed = evaluate(client, scenario, scenario.failed_arguments, provider) if scenario.kind == "repair" else None
-        allowed = evaluate(client, scenario, scenario.arguments, provider)
+        stored = fetch_stored(store.base_url, scenario)
+    except (httpx.HTTPError, ValueError) as error:
+        return Result(scenario, "ERROR", f"could not read ramen forge: {error}")
+    if stored is not None and stored.get("signature") and stored.get("canonical_payload"):
+        return Result(scenario, "ALREADY SIGNED", f"exemplar {stored.get('exemplar_id')}", stored.get("receipt_id"))
+
+    failed: Mapping[str, Any] | None = None
+    try:
+        if stored is None and scenario.kind == "repair":
+            failed = evaluate(client, scenario, scenario.failed_arguments, provider)
+        # A backfill evaluates exactly what the forge stores, so the receipt covers it.
+        evaluated = dict(stored["repaired_arguments"]) if stored is not None else scenario.arguments
+        allowed = evaluate(client, scenario, evaluated, provider)
     except (httpx.HTTPError, ValueError) as error:
         return Result(scenario, "ERROR", f"evaluation failed: {error}")
     if failed is not None and (failed.get("allowed") or not failed.get("receipt_verified")):
@@ -368,17 +445,29 @@ def ingest(client: RamenClient, scenario: Scenario, provider: Mapping[str, str],
     receipt, reason = verified_allow_receipt(allowed)
     if receipt is None:
         return Result(scenario, "SKIPPED", reason)
-    exemplar = build_exemplar(scenario, receipt, allowed, failed)
+
+    exemplar = (
+        backfill_exemplar(scenario, stored, receipt)
+        if stored is not None
+        else build_exemplar(scenario, receipt, allowed, failed)
+    )
     oversized = [name for name, limit in FORGE_TEXT_LIMITS.items() if len(getattr(exemplar, name)) > limit]
     if oversized:
         return Result(scenario, "SKIPPED", f"exceeds forge limits: {', '.join(oversized)}", exemplar.receipt_id)
     if dry_run:
-        return Result(scenario, "VERIFIED (dry run)", "not posted", exemplar.receipt_id)
+        action = "would backfill signature" if stored is not None else "would create"
+        return Result(scenario, "VERIFIED (dry run)", f"{action}; not posted", exemplar.receipt_id)
+
     try:
-        store.record_correction(exemplar)  # raises on anything other than 201 or 409
-    except (RuntimeError, PermissionError, ValueError) as error:
+        store.record_correction(exemplar)  # raises on anything other than 200, 201, or 409
+        readback = fetch_stored(store.base_url, scenario)
+    except (httpx.HTTPError, RuntimeError, PermissionError, ValueError) as error:
         return Result(scenario, "ERROR", str(error), exemplar.receipt_id)
-    return Result(scenario, "201 CREATED", f"exemplar {exemplar.exemplar_id}", exemplar.receipt_id)
+    problem = "record not found on readback" if readback is None else signature_problem(readback, str(exemplar.receipt_id))
+    if problem:
+        return Result(scenario, "ERROR", f"posted, but readback failed: {problem}", exemplar.receipt_id)
+    status = "BACKFILLED" if stored is not None else "CREATED"
+    return Result(scenario, status, "signature and canonical_payload verified on readback", exemplar.receipt_id)
 
 
 def main() -> int:
@@ -409,7 +498,7 @@ def main() -> int:
             results.append(result)
             print(f"[{result.status}] {scenario.label}" + (f": {result.detail}" if result.detail else ""))
 
-    print(f"\n{'Scenario':<42}{'Kind':<11}{'Receipt ID':<38}Forge")
+    print(f"\n{'Scenario':<42}{'Kind':<11}{'Receipt ID':<38}Forge status")
     for result in results:
         print(f"{result.scenario.label:<42}{result.scenario.kind:<11}{result.receipt_id or '-':<38}{result.status}")
     succeeded = sum(result.ok for result in results)

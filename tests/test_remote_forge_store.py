@@ -230,6 +230,12 @@ class RecordTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "INVALID_CRYPTOGRAPHIC_RECEIPT.*signed verdict is not 1"):
             self.record(_exemplar(), rejected)
 
+    def test_refreshed_200_is_accepted_and_logged_as_a_refresh(self) -> None:
+        refreshed = _response(200, {"success": True, "exemplar_id": "stored-id", "refreshed": True}, "POST")
+        with self.assertLogs("ramen_foundry.core.memory", level="INFO") as logs:
+            self.record(_exemplar(), refreshed)
+        self.assertTrue(any("refreshed the receipt" in line for line in logs.output))
+
     def test_duplicate_409_is_ignored(self) -> None:
         self.record(_exemplar(), _response(409, {"success": False}, "POST"))
 

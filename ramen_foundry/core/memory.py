@@ -601,11 +601,22 @@ class RemoteForgeMemoryStore(BaseEpisodicMemoryStore):
                 f"ramen forge rejected exemplar {exemplar.exemplar_id} "
                 f"(HTTP {response.status_code}): {_forge_error_detail(response)}"
             )
-        logger.info(
-            "ramen-foundry: contributed exemplar %s to ramen forge (HTTP %s)",
-            exemplar.exemplar_id,
-            response.status_code,
-        )
+        refreshed = False
+        try:
+            body = response.json()
+            refreshed = isinstance(body, dict) and body.get("refreshed") is True
+        except ValueError:
+            pass
+        if refreshed:
+            # Same lesson already stored: ramen forge kept its text and id and
+            # refreshed only the receipt, signature, and canonical payload.
+            logger.info("ramen-foundry: ramen forge refreshed the receipt of an existing lesson (HTTP 200)")
+        else:
+            logger.info(
+                "ramen-foundry: contributed exemplar %s to ramen forge (HTTP %s)",
+                exemplar.exemplar_id,
+                response.status_code,
+            )
 
 
 def _forge_error_detail(response: httpx.Response) -> str:

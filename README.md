@@ -172,6 +172,34 @@ Contributed records, including the task text and tool arguments, are publicly re
 
 `examples/demonstrate_collective_learning.py` runs the relay live. Agent 1 starts with blank memory: it is blocked on a ZIP-code proxy reason, repairs the call, and contributes the exemplar. Agent 2 is a fresh graph that recalls the exemplar at turn 0 and is allowed on its first attempt. Set `FORGE_WRITE_TOKEN` to enable contribution, and use `--forge-url` to target another forge instance.
 
+### Observability: the `_ramen_provenance` envelope
+
+Every tool call that `RamenSteerNode` allows returns a `ToolMessage` whose `response_metadata["_ramen_provenance"]` records where the decision and any recalled lesson came from. The envelope is flat, JSON-serialisable, and holds only identifiers and short text, so it is safe to log and index.
+
+```python
+message.response_metadata["_ramen_provenance"] == {
+    "source": "ramen-forge",            # "ramen-forge" for a RemoteForgeMemoryStore, else "ramen-foundry-local"
+    "version": "1.0",
+    "domain": "fintech",                # RamenSteerNode(domain=...), else the forge store's domain, else "general"
+    "tool_name": "issue_credit_adverse_action",
+    "exemplar_id": "6c1b...",           # the repair saved by this call; None if nothing was saved
+    "statutory_anchor": "Equal Credit Opportunity Act, 15 U.S.C. § 1691(a), (d)(2)–(3) ...",
+    "receipt_id": "c29be406-...",       # the Schema V5 receipt of the allowed call
+    "prevention_summary": "Use documented neutral creditworthiness factors ...",
+    "audit_uri": "https://.../api/v1/exemplars?domain=fintech&tool_name=...&task_fingerprint=...",
+}
+```
+
+Lesson fields (`exemplar_id`, `statutory_anchor`, `prevention_summary`, `audit_uri`) are `None` when the call was allowed on its first attempt or the repair was not saved. `audit_uri` is set only for forge-backed exemplars. It is a filtered listing by domain, tool, and task fingerprint, because ramen forge cannot look a record up by `exemplar_id`. Fetch it to read the lesson together with its `signature` and `canonical_payload`, which verify offline under `ramen_pk_v1`.
+
+Because the envelope rides on `response_metadata`, observability tools pick it up where they already capture tool messages:
+
+- **LangSmith:** LangChain tracing records `ToolMessage.response_metadata` with the run, so `_ramen_provenance` can be filtered and grouped on in trace views.
+- **Braintrust and other tracers:** log the dictionary as span metadata, for example `span.log(metadata=message.response_metadata["_ramen_provenance"])`.
+- **OpenTelemetry:** copy the scalar fields onto a span, for example `span.set_attribute("ramen.receipt_id", provenance["receipt_id"])`. Use flat attribute names, since OpenTelemetry attributes cannot hold nested dictionaries.
+
+`build_provenance` in `ramen_foundry.core.steer_node` builds the same envelope for planners that recall an exemplar before their first attempt and want to log it. `RamenSteerNode` does not query the store itself.
+
 ## Operational Scope & Boundary Demarcation
 
 **The ingestion invariant.** ramen-foundry templates govern resolved tool-execution payloads at the graph's pre-execution boundary (`tools/pre-execute`). The L2 gate evaluates the proposed capability name and its explicit arguments against the bound policy or bundle, requires a locally verified receipt, and only then releases the registered host tool. It enforces invariant decision contracts on the payload presented to that boundary; it does not reconstruct facts that are absent from the payload.
