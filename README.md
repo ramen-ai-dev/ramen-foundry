@@ -493,7 +493,7 @@ Each evaluation contains the resolved action, explicit arguments, policy/bundle 
 
 ### Pre-execution interception
 
-The governance call completes before registered capability lookup and invocation. A blocked action never reaches the host tool. This is materially different from output-only filtering after a shell command, SQL statement, or outbound request has already run.
+The governance call completes before registered capability lookup and invocation. A blocked action never reaches the host tool, unless you have explicitly enabled [shadow mode](#shadow-mode-ramen_shadow_mode). This is materially different from output-only filtering after a shell command, SQL statement, or outbound request has already run.
 
 ### Fail-closed mechanics
 
@@ -514,6 +514,56 @@ For a valid invocation, governance and tool outcomes return an explicit `governa
 `ramen-ai-core` verifies Ed25519 signatures and input hash binding locally. Receipts bind the verdict to the exact canonical input, resolved policy UUIDs, violations, statutory/control anchors, execution time, and outcome. Foundry requires `receipt_verified=True`; an unsigned or unverifiable allow is treated as a denial.
 
 Since 0.2.4, `RamenToolNode` and `RamenSteerNode` also re-verify every ALLOW independently before dispatch: the Ed25519 signature over `canonical_payload` under the pinned `ramen_pk_v1` key, the signed `schema_version`, `kid`, and `id`, the `payload_hash` binding to the evaluated tool call, and a signed `verdict` of `1`. Tool nodes accept any client object, so this keeps dispatch from resting on flags a wrapper, custom client, or tampered result could set. A genuine, validly signed BLOCK receipt returned with `allowed` flipped to `true` is refused, and so is an ALLOW receipt replayed from a different call. Each failure returns an error `ToolMessage`; `RamenSteerNode` routes it to `halt_node` without a repair turn and records no exemplar. `@ramen-ai/mcp-shield-proxy` 0.1.4 enforces the same gate.
+
+### Shadow mode (`RAMEN_SHADOW_MODE`)
+
+Available since 0.2.5.
+
+> **Risk: shadow mode disables enforcement.** When it is on, a tool call that ramen-ai BLOCKS is executed anyway. Use it only to observe policy decisions in a non-production or explicitly approved rollout, and never on a path where a blocked action can cause irreversible harm (payments, deletion, physical actuation, outbound publication).
+
+Shadow mode is **disabled by default**. It exists so enterprise teams can measure what the execution boundary would block before turning enforcement on. Enable it per node:
+
+```python
+gate = RamenSteerNode(
+    client=RamenClient(environ["RAMEN_API_KEY"]),
+    tools=tools,
+    planner_node="planner",
+    bundle_ids=["ramen__shield_core_it"],
+    shadow_mode=True,  # explicit True/False always wins over the environment
+)
+```
+
+or, when `shadow_mode` is left as `None`, through the environment:
+
+```bash
+export RAMEN_SHADOW_MODE=true
+```
+
+`RAMEN_SHADOW_MODE` is parsed strictly and case-insensitively: `1`, `true`, `yes`, `on` enable it; `0`, `false`, `no`, `off`, an empty value, or an unset variable disable it. Any other value raises `ValueError` when the node is constructed, so a typo cannot silently change enforcement. A non-boolean `shadow_mode` argument also raises `ValueError`.
+
+When shadow mode is enabled:
+
+- Each node logs one `WARNING` at construction on the `ramen_foundry.shadow` logger: `SHADOW MODE ENABLED ... policy BLOCK verdicts will be logged but NOT enforced`.
+- On a BLOCK, the node logs a `WARNING` on `ramen_foundry.shadow`, then dispatches the tool:
+
+  ```text
+  [RAMEN SHADOW MODE: POLICY VIOLATION NOT ENFORCED]
+  Receipt ID: <receipt id>  (signature: VERIFIED | UNVERIFIED: <reason>)
+  Steering Directive: <steering>
+  Rule Violated: <rule_id> (<primary statutory anchor>)
+  Reason: <reasoning>
+  Tool: <tool name>  tool_call_id=<id>  policy_ids=<ids>
+  Action: tool executed anyway (shadow_mode=True)
+  ```
+
+  The same fields are attached to the log record as `record.ramen_shadow` for structured handlers. The full receipt is logged only at `DEBUG`. Tool arguments and provider keys are never logged.
+- The receipt is reported as `VERIFIED` only if the client verified it **and** the node independently confirms the Ed25519 signature, the `payload_hash` binding to this exact call, and a signed `verdict` of `0` (BLOCK). A BLOCK whose receipt is missing or cannot be verified is logged as `UNVERIFIED` and still passes through.
+- The agent receives the real tool result in a normal `ToolMessage`. `response_metadata` carries the BLOCK `receipt`, `receipt_verified`, `policy_ids`, and a `ramen_shadow` record (`enforced: False`, rule, anchor, reason, steering directive, receipt id/kid, verification result). No new graph-state keys are written.
+- `RamenSteerNode` sends no steering reflection and takes no repair turn. It routes to `next_node` with `repair_turns: 0` and `pending_correction: None`, records no `CorrectionExemplar`, and attaches `_ramen_provenance` with the BLOCK `receipt_id` and `exemplar_id: None`.
+
+Shadow mode only changes what happens to a policy BLOCK. These still fail closed: evaluation or transport failures, an ALLOW whose receipt cannot be verified, an unregistered tool, and a tool that raises.
+
+The high-assurance templates (`CommercialLendingAgent`, `IndustrialAutomationAgent`, `DevboxShieldAgent`, `DbShieldAgent`, `ScoutShieldAgent`) do not accept `shadow_mode` and pin it to `False`, so `RAMEN_SHADOW_MODE` cannot disable their enforcement.
 
 ### Defence in depth
 

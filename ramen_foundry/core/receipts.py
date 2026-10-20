@@ -26,6 +26,8 @@ from ramen_ai.verifier import AUDIT_PUBLIC_KEYS
 
 SCHEMA_VERSION = "5.0"
 VERDICT_ALLOW = 1
+VERDICT_BLOCK = 0
+_VERDICT_LABELS = {VERDICT_ALLOW: "ALLOW", VERDICT_BLOCK: "BLOCK"}
 
 
 def _b64decode(value: str) -> bytes:
@@ -54,6 +56,20 @@ def signed_allow_problem(
 ) -> str | None:
     """Return why an ALLOW verdict lacks verifiable evidence, or ``None`` if it is sound.
 
+    Equivalent to :func:`signed_verdict_problem` with ``expected_verdict``
+    :data:`VERDICT_ALLOW`. Never raises.
+    """
+    return signed_verdict_problem(verdict, input_text, VERDICT_ALLOW, public_keys)
+
+
+def signed_verdict_problem(
+    verdict: Mapping[str, Any],
+    input_text: str,
+    expected_verdict: int,
+    public_keys: Mapping[str, str] | None = None,
+) -> str | None:
+    """Return why a verdict lacks verifiable evidence, or ``None`` if it is sound.
+
     All of these must hold, read from the signed bytes rather than the
     response's unsigned fields:
 
@@ -62,10 +78,18 @@ def signed_allow_problem(
        pinned key for ``kid`` (``ramen_pk_v1`` in production).
     3. The signed payload has ``schema_version`` "5.0", the same ``kid`` and
        ``id`` as the receipt, and ``payload_hash == SHA-256(input_text)``.
-    4. The signed ``verdict`` is 1 (ALLOW).
+    4. The signed ``verdict`` equals ``expected_verdict``
+       (:data:`VERDICT_ALLOW` or :data:`VERDICT_BLOCK`).
 
-    Never raises.
+    Never raises on malformed receipts. Raises ``ValueError`` only if
+    ``expected_verdict`` is not a known verdict code (a caller bug).
     """
+    if (
+        isinstance(expected_verdict, bool)
+        or not isinstance(expected_verdict, int)
+        or expected_verdict not in _VERDICT_LABELS
+    ):
+        raise ValueError("expected_verdict must be VERDICT_ALLOW (1) or VERDICT_BLOCK (0)")
     keys = AUDIT_PUBLIC_KEYS if public_keys is None else public_keys
     receipt = extract_receipt(verdict)
     if receipt is None:
@@ -101,6 +125,15 @@ def signed_allow_problem(
         return "signed id does not match the receipt id"
     if signed.get("payload_hash") != hashlib.sha256(input_text.encode("utf-8")).hexdigest():
         return "signed payload_hash does not match the evaluated tool call"
-    if signed.get("verdict") != VERDICT_ALLOW:
-        return f"signed verdict is {signed.get('verdict')!r}, not {VERDICT_ALLOW} (the evaluated call was blocked)"
+    signed_verdict = signed.get("verdict")
+    if isinstance(signed_verdict, bool) or signed_verdict != expected_verdict:
+        if expected_verdict == VERDICT_ALLOW:
+            return (
+                f"signed verdict is {signed_verdict!r}, not {VERDICT_ALLOW} "
+                "(the evaluated call was blocked)"
+            )
+        return (
+            f"signed verdict is {signed_verdict!r}, not {expected_verdict} "
+            f"({_VERDICT_LABELS[expected_verdict]})"
+        )
     return None

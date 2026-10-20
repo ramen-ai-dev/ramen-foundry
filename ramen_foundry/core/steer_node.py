@@ -14,19 +14,26 @@ from langgraph.graph import END
 from langgraph.types import Command
 from ramen_ai import RamenClient
 
-from .langgraph_nodes import RamenToolNode, ToolInvocation, _stringify
+from .langgraph_nodes import (
+    _DEFAULT_REASON,
+    _DEFAULT_STEERING,
+    DEFAULT_STATUTORY_ANCHOR,
+    RamenToolNode,
+    ToolInvocation,
+    _stringify,
+    _ToolDispatchError,
+    _violation_summary,
+    primary_statutory_anchor,  # noqa: F401  (re-exported; scripts import it from here)
+)
 from .memory import BaseEpisodicMemoryStore, CorrectionExemplar, RemoteForgeMemoryStore
+from .receipts import extract_receipt as _extract_receipt
 
 logger = logging.getLogger(__name__)
 
 REFLECTION_HEADER = "[ACTION BLOCKED BY RAMEN ACTION GATE]"
-DEFAULT_STATUTORY_ANCHOR = "General Operational Boundary"
 _REPLAN_INSTRUCTION = (
     "Replan and re-invoke the tool with parameters satisfying the steering directive."
 )
-_DEFAULT_RULE_ID = "UNSPECIFIED_RULE"
-_DEFAULT_REASON = "Blocked by ramen-ai policy."
-_DEFAULT_STEERING = "Revise the tool call so that it satisfies the governing policy."
 PROVENANCE_KEY = "_ramen_provenance"
 PROVENANCE_VERSION = "1.0"
 DEFAULT_DOMAIN = "general"
@@ -61,6 +68,11 @@ class RamenSteerNode(RamenToolNode):
       ``max_repair_turns`` reflections have been issued, go to ``halt_node``.
     * Evaluation failure, unverifiable receipt, unregistered tool, or tool
       exception: fail closed to ``halt_node`` without a repair retry.
+    * BLOCKED with ``shadow_mode`` enabled (disabled by default): no reflection
+      and no repair turn. The violation is logged, the tool is dispatched, the
+      BLOCK receipt and a ``ramen_shadow`` record are attached to
+      ``response_metadata``, repair state is reset, no :class:`CorrectionExemplar`
+      is recorded, and the graph goes to ``next_node``.
     """
 
     def __init__(
@@ -80,6 +92,7 @@ class RamenSteerNode(RamenToolNode):
         task_key: str = "task",
         domain: str | None = None,
         public_keys: Mapping[str, str] | None = None,
+        shadow_mode: bool | None = None,
     ) -> None:
         super().__init__(
             client=client,
@@ -90,6 +103,7 @@ class RamenSteerNode(RamenToolNode):
             provider_key=provider_key,
             provider_name=provider_name,
             public_keys=public_keys,
+            shadow_mode=shadow_mode,
         )
         if (
             isinstance(max_repair_turns, bool)
@@ -143,6 +157,8 @@ class RamenSteerNode(RamenToolNode):
             )
 
         if not verdict.get("allowed", False):
+            if self._shadow_mode:
+                return self._shadow_dispatch(invocation, verdict, repair_turns)
             return self._steer(invocation, verdict, repair_turns)
 
         unverified = self._unverified_allow(invocation, verdict)
@@ -156,22 +172,10 @@ class RamenSteerNode(RamenToolNode):
                 repair_turns,
             )
 
-        tool = self._tools.get(invocation.name)
-        if tool is None:
-            return self._halt(
-                invocation,
-                f"Tool '{invocation.name}' is not registered and was not executed.",
-                repair_turns,
-            )
-
         try:
-            result = tool.invoke(invocation.arguments)
-        except Exception as error:  # noqa: BLE001
-            return self._halt(
-                invocation,
-                f"Tool '{invocation.name}' failed: {error}",
-                repair_turns,
-            )
+            result = self._run_tool(invocation)
+        except _ToolDispatchError as error:
+            return self._halt(invocation, str(error), repair_turns)
 
         receipt = _extract_receipt(verdict)
         metadata: dict[str, Any] = {
@@ -214,27 +218,60 @@ class RamenSteerNode(RamenToolNode):
             goto=self._next_node,
         )
 
+    def _shadow_dispatch(
+        self,
+        invocation: ToolInvocation,
+        verdict: Mapping[str, Any],
+        repair_turns: int = 0,
+    ) -> Command:
+        """Log a non-enforced BLOCK, dispatch the tool, and skip the steering loop.
+
+        No reflection is sent to the planner and no correction exemplar is
+        recorded: nothing was repaired. A tool that is unregistered or raises
+        still halts.
+        """
+        metadata = self._shadow_metadata(invocation, verdict)
+        try:
+            result = self._run_tool(invocation)
+        except _ToolDispatchError as error:
+            return self._halt(invocation, str(error), repair_turns)
+
+        metadata[PROVENANCE_KEY] = build_provenance(
+            domain=self.domain,
+            tool_name=invocation.name,
+            exemplar=None,
+            receipt=metadata["receipt"],
+            store=self._memory_store,
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=_stringify(result),
+                        tool_call_id=invocation.tool_call_id,
+                        name=invocation.name,
+                        response_metadata=metadata,
+                    )
+                ],
+                "governance_error": None,
+                "tool_invocation": None,
+                "repair_turns": 0,
+                "pending_correction": None,
+            },
+            goto=self._next_node,
+        )
+
     def _steer(
         self,
         invocation: ToolInvocation,
         verdict: Mapping[str, Any],
         repair_turns: int,
     ) -> Command:
-        data = verdict.get("data")
-        data = data if isinstance(data, Mapping) else {}
-        violation = _primary_violation(data)
-        rule_id = _non_blank(violation.get("rule_id")) or _DEFAULT_RULE_ID
-        reason = (
-            _non_blank(violation.get("reasoning"))
-            or _non_blank(violation.get("rule_name"))
-            or _DEFAULT_REASON
-        )
-        steering = (
-            _non_blank(verdict.get("steering"))
-            or _non_blank(violation.get("recovery_instruction"))
-            or _DEFAULT_STEERING
-        )
-        anchor = primary_statutory_anchor(data.get("statutory_anchors"))
+        summary = _violation_summary(verdict)
+        rule_id = summary["rule_id"]
+        reason = summary["reason"]
+        steering = summary["steering"]
+        anchor = summary["primary_statutory_anchor"]
         exhausted = repair_turns >= self._max_repair_turns
         instruction = (
             f"Repair budget exhausted after {repair_turns} of {self._max_repair_turns} "
@@ -388,15 +425,6 @@ def build_provenance(
     }
 
 
-def primary_statutory_anchor(anchors: Any) -> str:
-    """Return the first non-blank statutory anchor, or the general boundary label."""
-    if isinstance(anchors, Sequence) and not isinstance(anchors, str) and anchors:
-        first = anchors[0]
-        if isinstance(first, str) and first.strip():
-            return first.strip()
-    return DEFAULT_STATUTORY_ANCHOR
-
-
 def format_reflection(
     *,
     rule_id: str,
@@ -415,32 +443,6 @@ def format_reflection(
             f"Instruction: {instruction}",
         )
     )
-
-
-def _primary_violation(data: Mapping[str, Any]) -> Mapping[str, Any]:
-    violations = data.get("total_violations")
-    if isinstance(violations, list):
-        for violation in violations:
-            if isinstance(violation, Mapping):
-                return violation
-    return {}
-
-
-def _extract_receipt(verdict: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return the Schema V5 receipt from an SDK verdict.
-
-    ``RamenClient.evaluate_compliance`` exposes the receipt inside the full
-    ``data`` payload; a top-level ``receipt`` key takes precedence if present.
-    """
-    receipt = verdict.get("receipt")
-    if not isinstance(receipt, Mapping):
-        data = verdict.get("data")
-        receipt = data.get("receipt") if isinstance(data, Mapping) else None
-    return dict(receipt) if isinstance(receipt, Mapping) else None
-
-
-def _non_blank(value: Any) -> str | None:
-    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _json_safe(arguments: Mapping[str, Any]) -> dict[str, Any]:

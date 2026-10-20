@@ -64,6 +64,8 @@ class ScoutShieldAgent:
             bundle_ids=[SHIELD_CORE_IT_BUNDLE_ID],
             provider_key=provider_key,
             provider_name=provider_name,
+            # High-assurance template: always enforce, ignoring RAMEN_SHADOW_MODE.
+            shadow_mode=False,
         )
 
     @property

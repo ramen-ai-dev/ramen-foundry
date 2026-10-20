@@ -73,6 +73,8 @@ class CommercialLendingAgent:
             bundle_ids=[FINTECH_BANKING_INVARIANCE_BUNDLE_ID],
             provider_key=provider_key,
             provider_name=provider_name,
+            # High-assurance template: always enforce, ignoring RAMEN_SHADOW_MODE.
+            shadow_mode=False,
         )
         self._graph = self._build_graph()
 
