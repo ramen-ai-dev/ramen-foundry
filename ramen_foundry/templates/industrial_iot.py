@@ -8,7 +8,11 @@ from typing import Annotated, Any, Literal, TypedDict
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph, add_messages
 from langgraph.types import Command
+from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, with_config
 from ramen_ai import RamenClient
+
+# pydantic requires typing_extensions.TypedDict on Python < 3.12.
+from typing_extensions import TypedDict as ValidatedTypedDict
 
 from ramen_foundry.core import RamenToolNode, ToolInvocation
 
@@ -17,23 +21,62 @@ from ._security import validate_provider_configuration, validate_tool_registry
 INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID = (
     "ramen__industrial_iot_actuation_invariance"
 )
+MANIPULATION_TOOL_NAME = "dispatch_manipulation"
 ManipulationActionType = Literal[
     "PICK_AND_PLACE", "INSERT_TOOL", "APPLY_FORCE", "POUR_LIQUID", "WIPE_SURFACE"
 ]
 
+_NonBlank = Annotated[str, Field(pattern=r"\S")]
+_PhysicalQuantity = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
-class ManipulationDispatchPayload(TypedDict):
-    """Resolved host-tool contract for one robotic manipulation dispatch."""
 
-    robot_id: str
+@with_config(ConfigDict(extra="forbid", strict=True))
+class ManipulationDispatchPayload(ValidatedTypedDict):
+    """Resolved host-tool contract for one robotic manipulation dispatch.
+
+    ``IndustrialAutomationAgent`` enforces this contract on every
+    ``dispatch_manipulation`` call before the policy bundle is contacted. All
+    nine keys are required, no others are allowed, strings must be non-blank,
+    and velocity, force and human proximity must be finite and non-negative.
+    """
+
+    robot_id: _NonBlank
     action_type: ManipulationActionType
-    target_object: str
-    destination_target: str
-    commanded_velocity_mps: float
-    commanded_force_nm: float
-    human_proximity_meters: float
+    target_object: _NonBlank
+    destination_target: _NonBlank
+    commanded_velocity_mps: _PhysicalQuantity
+    commanded_force_nm: _PhysicalQuantity
+    human_proximity_meters: _PhysicalQuantity
     active_hazard_flags: list[str]
-    scene_context_id: str
+    scene_context_id: _NonBlank
+
+
+_MANIPULATION_ADAPTER: TypeAdapter[ManipulationDispatchPayload] = TypeAdapter(
+    ManipulationDispatchPayload
+)
+
+
+def manipulation_payload_problem(arguments: Any) -> str | None:
+    """Return why ``arguments`` violates :class:`ManipulationDispatchPayload`, or ``None``.
+
+    The message names fields and the kind of violation only. It never echoes
+    submitted values.
+    """
+
+    try:
+        _MANIPULATION_ADAPTER.validate_python(arguments)
+    except ValidationError as error:
+        details = sorted(
+            {
+                f"{'.'.join(str(part) for part in item['loc']) or 'payload'} ({item['type']})"
+                for item in error.errors()
+            }
+        )
+        return (
+            "dispatch_manipulation arguments violate the ManipulationDispatchPayload contract: "
+            + ", ".join(details)
+        )
+    return None
 
 
 INDUSTRIAL_AUTOMATION_TOOL_NAMES = frozenset(
@@ -66,7 +109,9 @@ class IndustrialAutomationAgent:
 
     ``dispatch_manipulation`` binds the robot identity, action type, target and
     destination, commanded velocity and force, human proximity, active hazards,
-    and scene context for embodied physical-safety evaluation.
+    and scene context for embodied physical-safety evaluation. The call must
+    satisfy :class:`ManipulationDispatchPayload`; otherwise it is blocked
+    locally, before any evaluation request, and the tool is not run.
 
     Host applications provide the actual LangChain tools and retain physical
     control of PLC/SIS infrastructure. Every invocation is evaluated against
@@ -130,7 +175,7 @@ class IndustrialAutomationAgent:
             arguments=dict(payload),
             tool_call_id=tool_call_id or f"{tool_name}-direct",
         )
-        return self._guard({"tool_invocation": invocation})
+        return self._gate({"tool_invocation": invocation})
 
     def invoke(self, state: Mapping[str, Any]) -> dict[str, Any]:
         """Route industrial state through the compiled governance workflow."""
@@ -142,9 +187,19 @@ class IndustrialAutomationAgent:
 
         return self.invoke(state)
 
+    def _gate(self, state: IndustrialAutomationState) -> Command:
+        """Enforce the manipulation payload contract locally, then evaluate."""
+
+        invocation = ToolInvocation.model_validate(state["tool_invocation"])
+        if invocation.name == MANIPULATION_TOOL_NAME:
+            problem = manipulation_payload_problem(invocation.arguments)
+            if problem is not None:
+                return self._guard._return_error(invocation, problem)
+        return self._guard({"tool_invocation": invocation})
+
     def _build_graph(self) -> Any:
         workflow = StateGraph(IndustrialAutomationState)
-        workflow.add_node("governed_industrial_automation_action", self._guard)
+        workflow.add_node("governed_industrial_automation_action", self._gate)
         workflow.add_edge(START, "governed_industrial_automation_action")
         workflow.add_edge("governed_industrial_automation_action", END)
         return workflow.compile()
