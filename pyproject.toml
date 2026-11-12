@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ramen-foundry"
-version = "0.2.5"
-description = "LangGraph governance nodes and human-review workflow templates powered by ramen-ai."
+version = "0.2.6"
+description = "LangGraph governance nodes and policy-bound action-gate templates (authorization, eligibility, provenance, industrial, IT) powered by ramen-ai."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -16,6 +16,7 @@ dependencies = [
     "langgraph==1.2.11",
     "langchain-core==1.6.0",
     "pydantic>=2.10.0,<3.0.0",
+    "typing-extensions>=4.12.2",
 ]
 
 [project.optional-dependencies]
@@ -45,3 +46,7 @@ packages = ["ramen_foundry"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+addopts = "-m 'not live'"
+markers = [
+    "live: serial tests against api.ramenai.dev; opt in with RAMEN_LIVE_TESTS=1 and run with -m live",
+]

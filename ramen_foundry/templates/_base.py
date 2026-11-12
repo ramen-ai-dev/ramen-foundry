@@ -127,12 +127,27 @@ class GovernedToolAgent:
 
         return None
 
+    def _bind_invocation(self, invocation: ToolInvocation) -> ToolInvocation:
+        """Return the invocation that is evaluated and executed after a clean pre-flight.
+
+        Subclasses may add facts they derived and verified locally. The returned
+        invocation is exactly what the backend evaluates, what the receipt binds,
+        and what the tool receives.
+        """
+
+        return invocation
+
     def _gate(self, state: GovernedToolState) -> Command:
         invocation = ToolInvocation.model_validate(state["tool_invocation"])
         try:
             reason = self._preflight(invocation)
         except Exception as error:  # noqa: BLE001
             reason = f"Local pre-flight check failed; tool was not executed: {error}"
+        if reason is None:
+            try:
+                invocation = self._bind_invocation(invocation)
+            except Exception as error:  # noqa: BLE001
+                reason = f"Local evidence binding failed; tool was not executed: {error}"
         if reason is not None:
             return self._guard._return_error(invocation, reason)
         return self._guard({"tool_invocation": invocation})

@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
+from datetime import date
 from typing import Annotated, Any, Literal
 
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 from ramen_ai import RamenClient
 
 from ramen_foundry.core import ToolInvocation
@@ -23,6 +32,19 @@ _ORDERING_OPS = frozenset({"lt", "lte", "gt", "gte"})
 _MEMBERSHIP_OPS = frozenset({"in", "not_in"})
 
 _NonBlank = Annotated[str, Field(pattern=r"\S")]
+_Money = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+_PositiveMoney = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _check_iso_date(value: str) -> str:
+    if not _ISO_DATE.fullmatch(value):
+        raise ValueError("must be an ISO date (YYYY-MM-DD)")
+    date.fromisoformat(value)
+    return value
+
+
+_IsoDate = Annotated[str, AfterValidator(_check_iso_date)]
 
 
 def _kind(value: Any) -> str | None:
@@ -201,22 +223,112 @@ class ExclusionRuleSet(BaseModel):
         )
 
 
+class _Context(BaseModel):
+    """Claim-evidence object. Unknown keys are kept and sent to the bundle unchanged."""
+
+    model_config = ConfigDict(extra="allow", strict=True)
+
+
+class PolicySystemRecord(_Context):
+    """Term, status and loss date as confirmed by the policy system of record."""
+
+    effective: _IsoDate
+    expiry: _IsoDate
+    status: _NonBlank
+    date_of_loss: _IsoDate
+    confirmed_by: _NonBlank
+    written_endorsement: _NonBlank | None = None
+
+
+class InspectionEvidence(_Context):
+    """Inspection token issued out of band and verified by the platform."""
+
+    token: _NonBlank
+    issued_out_of_band_by: _NonBlank
+    verified_by_platform: bool
+    inspection_date: _IsoDate
+    scope: _NonBlank
+    assessed_usd: _PositiveMoney
+
+
+class PlatformSchedule(_Context):
+    """Schedule, sub-limit and aggregate delivered by the policy platform."""
+
+    source: _NonBlank
+    unit_block_limit_usd: _PositiveMoney
+    remaining_aggregate_usd: _Money
+    deductible_usd: _Money
+    drawn_usd: _Money
+
+
+class ClaimEvidence(_Context):
+    """The platform-confirmed context that must sit inside ``eligibility_facts``."""
+
+    policy_system_record: PolicySystemRecord
+    inspection_evidence: InspectionEvidence
+    platform_schedule: PlatformSchedule
+    verified_file_findings: _NonBlank
+
+
+class ClaimRequest(_Context):
+    """The action-level arguments of ``confirm_eligibility`` and ``bind_contract_terms``."""
+
+    subject_id: _NonBlank
+    approved_amount_usd: _PositiveMoney
+
+
+def _claim_evidence_problem(request: ClaimRequest, evidence: ClaimEvidence) -> str | None:
+    record, inspection, schedule = (
+        evidence.policy_system_record,
+        evidence.inspection_evidence,
+        evidence.platform_schedule,
+    )
+    effective, expiry = date.fromisoformat(record.effective), date.fromisoformat(record.expiry)
+    loss = date.fromisoformat(record.date_of_loss)
+    if expiry < effective:
+        return "Policy term expires before it takes effect."
+    if record.status.strip().upper() != "ACTIVE":
+        return "The policy system does not show the policy as active."
+    if not effective <= loss <= expiry and record.written_endorsement is None:
+        return "The date of loss is outside the confirmed policy term and no written endorsement covers it."
+    if inspection.verified_by_platform is not True:
+        return "The inspection token has not been verified by the platform."
+    if date.fromisoformat(inspection.inspection_date) < loss:
+        return "The inspection predates the loss, so it cannot support this claim."
+    amount = request.approved_amount_usd
+    if amount > inspection.assessed_usd:
+        return "The approved amount exceeds the amount assessed by the verified inspection."
+    if amount > schedule.unit_block_limit_usd or amount > schedule.remaining_aggregate_usd:
+        return "The approved amount exceeds the scheduled limit or the remaining aggregate."
+    return None
+
+
 class EligibilityGateAgent(GovernedToolAgent):
-    """Gate contract and eligibility actions behind local deterministic exclusions.
+    """Gate contract and eligibility actions behind local deterministic checks.
 
-    ``confirm_eligibility`` and ``bind_contract_terms`` must carry a mapping of
-    resolved facts under ``eligibility_facts`` (configurable with ``facts_key``).
-    Before the ramen-ai backend is contacted, the facts are evaluated against the
-    host-supplied :class:`ExclusionRuleSet`. The call is blocked locally, with no
-    evaluation request and no tool execution, when any rule excludes the subject,
-    when a referenced fact is missing or unusable, or when a rule cannot be
-    evaluated. A subject that clears every rule is still subject to the bundle
-    verdict and its Ed25519 receipt.
+    ``confirm_eligibility`` and ``bind_contract_terms`` carry ``subject_id``,
+    ``approved_amount_usd`` and a mapping of resolved facts under
+    ``eligibility_facts`` (configurable with ``facts_key``). The facts hold the
+    flat values your :class:`ExclusionRuleSet` reads plus the claim evidence in
+    :class:`ClaimEvidence`: ``policy_system_record``, ``inspection_evidence``,
+    ``platform_schedule`` and ``verified_file_findings``.
 
-    The facts are part of the evaluated payload, so the signed receipt binds the
-    exact facts the local rules saw. Block reasons name rules and fact fields but
-    never echo fact values. Upstream data quality, protected-attribute controls
-    and rule authorship remain with the host.
+    Before the ramen-ai backend is contacted, the call is blocked locally, with no
+    evaluation request and no tool execution, when:
+
+    * any host exclusion rule excludes the subject, a referenced fact is missing
+      or unusable, or a rule cannot be evaluated;
+    * the claim evidence is missing or malformed;
+    * the policy is not active, the loss is outside the confirmed term with no
+      written endorsement, the inspection is unverified or predates the loss, or
+      the approved amount exceeds the assessed amount, the scheduled limit or the
+      remaining aggregate.
+
+    A subject that clears every local check is still subject to the bundle verdict
+    and its Ed25519 receipt. The facts are part of the evaluated payload, so the
+    signed receipt binds exactly what the local checks saw. Block reasons name
+    rules and fields but never echo fact values. Upstream data quality,
+    protected-attribute controls and rule authorship remain with the host.
     """
 
     bundle_id = ELIGIBILITY_GATE_BUNDLE_ID
@@ -258,13 +370,23 @@ class EligibilityGateAgent(GovernedToolAgent):
         return self._rules.evaluate(facts)
 
     def _preflight(self, invocation: ToolInvocation) -> str | None:
-        decision = self._rules.evaluate(invocation.arguments.get(self._facts_key))
-        if decision.eligible:
-            return None
+        facts = invocation.arguments.get(self._facts_key)
+        decision = self._rules.evaluate(facts)
         if decision.hits:
             rules = "; ".join(f"{hit.rule_id} ({hit.description})" for hit in decision.hits)
             return f"Excluded by local eligibility rule(s): {rules}. The action was not evaluated."
-        return (
-            "Eligibility could not be determined locally (fail closed): "
-            f"{' | '.join(decision.problems)}"
-        )
+        if not decision.eligible:
+            return (
+                "Eligibility could not be determined locally (fail closed): "
+                f"{' | '.join(decision.problems)}"
+            )
+        try:
+            request = ClaimRequest.model_validate(invocation.arguments)
+            evidence = ClaimEvidence.model_validate(facts)
+        except ValidationError as error:
+            fields = sorted({".".join(str(part) for part in item["loc"]) for item in error.errors()})
+            return (
+                "Claim evidence is incomplete or malformed "
+                f"(fields: {', '.join(fields)}); supply the full platform-confirmed claim context."
+            )
+        return _claim_evidence_problem(request, evidence)

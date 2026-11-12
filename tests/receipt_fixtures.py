@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from cryptography.hazmat.primitives import serialization
@@ -47,9 +48,12 @@ def sign_receipt(
     receipt_id: str | None = None,
     kid: str = "ramen_pk_v1",
     statutory_anchors: list[str] | None = None,
+    timestamp: str | None = None,
 ) -> dict[str, Any]:
     """Return a receipt whose signature and payload_hash bind ``input_text``."""
     receipt_id = receipt_id or str(uuid.uuid4())
+    if timestamp is None:
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     anchors = list(statutory_anchors or [])
     canonical = json.dumps(
         {
@@ -59,6 +63,7 @@ def sign_receipt(
             "verdict": verdict,
             "payload_hash": hashlib.sha256(input_text.encode("utf-8")).hexdigest(),
             "statutory_anchors": anchors,
+            "timestamp": timestamp,
         },
         sort_keys=True,
         separators=(",", ":"),

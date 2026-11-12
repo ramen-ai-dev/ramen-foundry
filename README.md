@@ -27,6 +27,9 @@ Use the low-level nodes to govern an existing graph, or start with a domain temp
 - **devbox-shield** — workstation inspection, cleanup, and process control.
 - **db-shield** — database triage, query inspection, and deadlock diagnosis.
 - **scout-shield** — injection-resistant web research and publication.
+- **authorization-gate** — corporate-spend authorization: ERP budget clearance, platform limits, vendor exposure, and bound dual approvals.
+- **eligibility-gate** — contract and claim eligibility: local deterministic exclusions plus platform-confirmed claim evidence.
+- **provenance-gate** — regulated-record submissions on locally verified Schema V5 Ed25519 receipts.
 
 The package supplies governance boundaries and workflow structure; host applications retain ownership of credentials, model adapters, tools, infrastructure permissions, and human approvals. Policy enforcement supports compliance programs but does not by itself constitute legal advice or certification.
 
@@ -232,8 +235,11 @@ This verifies the dual boundary on an authentic public credit distribution: grou
 | `devbox-shield` | `DevboxShieldAgent` | `ramen__shield_core_it`: Destructive Execution, Infrastructure Abuse, Secret Exfiltration | Directory inspection, path deletion, process termination |
 | `db-shield` | `DbShieldAgent` | `ramen__shield_core_it`: Destructive Execution and Infrastructure Abuse | Query/plan inspection, deadlock diagnosis, backend termination |
 | `scout-shield` | `ScoutShieldAgent` | `ramen__shield_core_it`: OWASP ASI06 Indirect Prompt Injection and Secret Exfiltration | URL retrieval, extraction, approved local reads, publication |
+| `authorization-gate` | `AuthorizationGateAgent` | `ramen__financial_authorization_invariance`: system-of-record budget clearance, platform order limit, cumulative vendor exposure, independent out-of-band approvals | Expenditure approval and payment release |
+| `eligibility-gate` | `EligibilityGateAgent` | `ramen__contractual_eligibility_invariance`: verified coverage window, exclusions as written, out-of-band inspection evidence, scheduled limits | Eligibility confirmation and contract-term binding |
+| `provenance-gate` | `ProvenanceGateAgent` | `ramen__compliance_provenance_invariance`: verified current evidence, subject and record-type binding, tokens as issued, no self-attestation | Regulated filing submission and report release |
 
-`ramen__shield_core_it`, `ramen__fintech_banking_invariance`, and `ramen__industrial_iot_actuation_invariance` are immutable production bundle slugs. The backend resolves each bundle to its currently active policy UUIDs at request time; the signed receipt records the exact resolved UUIDs that ran. This lets policy implementations evolve without requiring client releases.
+`ramen__shield_core_it`, `ramen__fintech_banking_invariance`, `ramen__industrial_iot_actuation_invariance`, `ramen__financial_authorization_invariance`, `ramen__contractual_eligibility_invariance`, and `ramen__compliance_provenance_invariance` are immutable production bundle slugs. The backend resolves each bundle to its currently active policy UUIDs at request time; the signed receipt records the exact resolved UUIDs that ran. This lets policy implementations evolve without requiring client releases.
 
 ### fintech commercial lending
 
@@ -290,6 +296,8 @@ python3 examples/benchmark_credit_data.py
 | `adjust_plc_setpoint` | `node_id`, `tag`, `target_val`, `current_val`, `ramp_rate_sec`, `engineering_units`, `asset_criticality`, `operating_envelope_id` |
 | `mutate_safety_parameter` | `node_id`, `tag`, `mutation_type`, `requested_value`, `duration_sec`, `physical_key_interlock_verified`, `management_of_change_id` |
 | `dispatch_manipulation` | `robot_id`, `action_type`, `target_object`, `destination_target`, `commanded_velocity_mps`, `commanded_force_nm`, `human_proximity_meters`, `active_hazard_flags`, `scene_context_id` |
+
+**Local payload enforcement (since 0.2.6).** `dispatch_manipulation` arguments must satisfy `ManipulationDispatchPayload` before any evaluation request is made: all nine keys present and no others, `action_type` one of `PICK_AND_PLACE`, `INSERT_TOOL`, `APPLY_FORCE`, `POUR_LIQUID`, `WIPE_SURFACE`, non-blank strings, `active_hazard_flags` a list of strings, and `commanded_velocity_mps`, `commanded_force_nm` and `human_proximity_meters` finite, non-negative numbers (booleans are rejected). A non-conforming call returns a `governance_error` that names the fields, never the values, and the tool is not run. `manipulation_payload_problem(arguments)` returns the same message for pre-validation.
 
 A consequential nonzero setpoint change with `ramp_rate_sec <= 0` is blocked rather than divided through. Target bounds are inclusive under the active policy, and represented engineering units, envelope applicability, current telemetry, maximum slew, and relevant transient/history evidence must agree. Certified SIS and E-stop registers have zero autonomous-software-override authority: a physical-key Boolean or MOC identifier alone does not prove target-local engagement, active authorization, or technician-only execution.
 
@@ -382,6 +390,51 @@ python examples/simulate_flagship_plunge.py --record recordings/governed.mp4
 python examples/simulate_flagship_plunge.py --ungoverned --record recordings/ungoverned.mp4
 python examples/simulate_flagship_plunge.py --live-model --record recordings/live-model.mp4
 ```
+
+### authorization-gate
+
+`AuthorizationGateAgent` permits `approve_expenditure` and `release_payment`. The bundle judges **facts delivered by the finance platform**, so a call that omits them is blocked. The template therefore requires the full context and checks the arithmetic locally, before any evaluation request.
+
+| Field | Contents |
+|---|---|
+| `request_id`, `requested_by`, `amount_usd` | The request, its requester, and the full amount it commits |
+| `payee`, `payee_account` | Who is paid and into which account |
+| `cost_center`, `fiscal_period`, `spend_category` | What the spend is charged to. The ERP clearance must match all three |
+| `platform_limits` | `source`, `per_order_usd`, `per_vendor_cumulative_usd`, `dual_approval_threshold_usd`, optional `required_approvers` |
+| `erp_clearance` | `id`, `status`, `cost_center`, `fiscal_period`, `spend_category`, `balance_usd`, `confirmed_by` (optional `confirmation_token`) |
+| `vendor_exposure` | `source`, `vendor_group`, `open_pending_paid_usd` |
+| `approvals` | Per approver: `approver_id`, `role`, `approval_token`, `approved_out_of_band`, and `bound_to` (`amount_usd`, `payee`, `payee_account`) |
+
+Local fail-closed checks: evidence incomplete or malformed; amount above the per-order limit or the ERP balance; clearance not `OPEN`, or for a different cost center, fiscal period or spend category than the request; amount plus vendor exposure above the cumulative cap; any approval that is not out of band or not bound to this amount, payee and account; and, at or above the dual-approval threshold, fewer than the required distinct approvers, a repeated approver, or the requester among the approvers. The threshold and approver count **default to the platform's own values**. A `dual_control_threshold_usd` or `required_approvers` given to the constructor can only make the gate stricter. Pass `budget_verifier` and `approval_verifier` (any `EvidenceVerifier`, for example `Ed25519TokenVerifier`) to verify clearance and approval tokens locally.
+
+```python
+from os import environ
+from ramen_ai import RamenClient
+from ramen_foundry import AuthorizationGateAgent
+agent = AuthorizationGateAgent(client=RamenClient(environ["RAMEN_API_KEY"]), tools={"release_payment": release_payment})
+command = agent.execute("release_payment", spend_with_platform_context)
+```
+
+### eligibility-gate
+
+`EligibilityGateAgent` permits `confirm_eligibility` and `bind_contract_terms`. Arguments are `subject_id`, `approved_amount_usd`, and `eligibility_facts`. The facts hold the flat values your `ExclusionRuleSet` reads plus the platform-confirmed claim evidence:
+
+| Fact | Contents |
+|---|---|
+| `policy_system_record` | `effective`, `expiry`, `status`, `date_of_loss` (ISO dates), `confirmed_by`, optional `written_endorsement` |
+| `inspection_evidence` | `token`, `issued_out_of_band_by`, `verified_by_platform`, `inspection_date`, `scope`, `assessed_usd` |
+| `platform_schedule` | `source`, `unit_block_limit_usd`, `remaining_aggregate_usd`, `deductible_usd`, `drawn_usd` |
+| `verified_file_findings` | The verified claim-file findings, in text |
+
+Local fail-closed checks run first, with no evaluation request and no tool execution: any `ExclusionRule` that hits (boolean `all_of` plus optional `any_of` over named facts, with strict types, so a missing, `None`, non-finite or wrong-typed fact blocks); incomplete or malformed claim evidence; a policy that is not active; a loss outside the confirmed term with no written endorsement; an unverified inspection, or one that predates the loss; and an approved amount above the assessed amount, the scheduled limit or the remaining aggregate. Block reasons name rules and fields and never echo fact values. A local pass is not a release: the bundle verdict and its receipt are still required, and a bundle block routes to human adjudication, not to a denial.
+
+### provenance-gate
+
+`ProvenanceGateAgent` permits `submit_filing` and `release_report`, for the record types the platform declares token-required (`token_required_record_types`, required). Arguments are `record_type`, `subject_id`, `artifact_sha256` and `evidence`: a list of `{"payload", "receipt"}` items, each a Schema V5 Ed25519 receipt for the exact payload text it was issued for, with an ALLOW verdict.
+
+Evidence is accepted only from Schema V5 receipts, verified locally against the pinned `ramen_pk_v1` key: signature, signed `payload_hash`, signed ALLOW verdict, a signed timestamp within `max_receipt_age_seconds` (default 24 hours), and a recorded call whose `arguments` carry the same `subject_id`, `record_type` and `artifact_sha256` as the submission. Receipt ids may not repeat. No stored lessons, remote records or lookup URIs are consulted.
+
+**No self-attestation.** The `verifier_report` the bundle evaluates is written by the template from the receipts it verified. A call that supplies its own `verifier_report`, `record_type_token_required` or `tokens_submitted_unmodified` is blocked. Schema V5 receipts are immutable signed statements with no revocation mechanism, so the derived report states them as not revoked and not superseded, and as current only while inside the age limit. LangChain passes a tool only the parameters its schema declares, so declare a `verifier_report` parameter if the tool should receive the derived report.
 
 ### hrtech
 
@@ -563,7 +616,7 @@ When shadow mode is enabled:
 
 Shadow mode only changes what happens to a policy BLOCK. These still fail closed: evaluation or transport failures, an ALLOW whose receipt cannot be verified, an unregistered tool, and a tool that raises.
 
-The high-assurance templates (`CommercialLendingAgent`, `IndustrialAutomationAgent`, `DevboxShieldAgent`, `DbShieldAgent`, `ScoutShieldAgent`) do not accept `shadow_mode` and pin it to `False`, so `RAMEN_SHADOW_MODE` cannot disable their enforcement.
+The high-assurance templates (`CommercialLendingAgent`, `IndustrialAutomationAgent`, `DevboxShieldAgent`, `DbShieldAgent`, `ScoutShieldAgent`, and the `GovernedToolAgent` family: `AuthorizationGateAgent`, `EligibilityGateAgent`, `ProvenanceGateAgent`) do not accept `shadow_mode` and pin it to `False`, so `RAMEN_SHADOW_MODE` cannot disable their enforcement.
 
 ### Defence in depth
 
@@ -573,18 +626,46 @@ Semantic governance is not a replacement for OS permissions, sandboxing, read-on
 
 ```python
 from ramen_foundry import (
+    AUTHORIZATION_GATE_BUNDLE_ID,
+    ApprovalBinding,
+    ApprovalEvidence,
+    AuthorizationEvidence,
+    AuthorizationGateAgent,
     BaseEpisodicMemoryStore,
+    ClaimEvidence,
+    ClaimRequest,
     CommercialLendingAgent,
     CorrectionExemplar,
     DbShieldAgent,
     DevboxShieldAgent,
+    ELIGIBILITY_GATE_BUNDLE_ID,
     EU_AI_ACT_PROXY_BIAS_POLICY_ID,
+    Ed25519TokenVerifier,
+    EligibilityCondition,
+    EligibilityDecision,
+    EligibilityGateAgent,
+    ErpClearance,
+    EvidenceResult,
+    EvidenceVerifier,
+    ExclusionHit,
+    ExclusionRule,
+    ExclusionRuleSet,
+    GovernedToolAgent,
     INDUSTRIAL_IOT_ACTUATION_INVARIANCE_BUNDLE_ID,
     IndustrialAutomationAgent,
+    InspectionEvidence,
     JSONFileMemoryStore,
+    ManipulationActionType,
+    ManipulationDispatchPayload,
+    PROVENANCE_GATE_BUNDLE_ID,
+    PlatformLimits,
+    PlatformSchedule,
+    PolicySystemRecord,
+    ProvenanceGateAgent,
     RamenGovernedNode,
     RamenSteerNode,
     RamenToolNode,
+    ReceiptEvidenceVerifier,
     RemoteForgeMemoryStore,
     ResumeScreeningAgent,
     ResumeScreeningRequest,
@@ -593,10 +674,24 @@ from ramen_foundry import (
     SQLiteMemoryStore,
     ScoutShieldAgent,
     ToolInvocation,
+    VendorExposure,
+    VerifiedReceipt,
+    manipulation_payload_problem,
 )
 ```
 
 `ToolInvocation` contains a non-empty `name`, an `arguments` dictionary, and a non-empty `tool_call_id`. `RamenToolNode`, `RamenSteerNode`, and `RamenGovernedNode` accept explicit `policy_ids`, `bundle_ids`, or both; at least one scope is required.
+
+## Live integration tests
+
+`tests/live/` verifies the authorization, eligibility and provenance templates against the production bundles at `https://api.ramenai.dev`. The suite is opt-in and sends about 35 evaluations serially, with 2.5 s spacing and a back-off on HTTP 429. Each verdict case runs three times and passes on a two-of-three majority, because the evaluator is semantic. Every live receipt must also verify as Schema V5 Ed25519 under the production pinned keys.
+
+```bash
+export RAMEN_API_KEY="your-ramen-api-key"
+RAMEN_LIVE_TESTS=1 python -m pytest -m live tests/live -s
+```
+
+A plain `pytest` run deselects them (`-m "not live"`).
 
 ## Runtime dependencies
 
@@ -608,7 +703,8 @@ from ramen_foundry import (
 | `cryptography` | `>=42.0.0` |
 | `langgraph` | `==1.2.11` |
 | `langchain-core` | `==1.6.0` |
-| `pydantic` | `==2.13.4` |
+| `pydantic` | `>=2.10.0,<3.0.0` |
+| `typing-extensions` | `>=4.12.2` |
 
 ## Resources
 

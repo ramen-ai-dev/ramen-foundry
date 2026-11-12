@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import unittest
 from typing import Any
 
-from langchain_core.tools import tool
 from pydantic import ValidationError
 
 from ramen_foundry import (
@@ -15,7 +15,7 @@ from ramen_foundry import (
     ExclusionRule,
     ExclusionRuleSet,
 )
-from tests.gate_fixtures import FakeClient
+from tests.gate_fixtures import FakeClient, stub_tool
 
 
 def _rules() -> ExclusionRuleSet:
@@ -60,6 +60,29 @@ def _facts(**overrides: Any) -> dict[str, Any]:
         "has_guarantor": False,
         "credit_band": "B",
         "prior_default": False,
+        "policy_system_record": {
+            "effective": "2026-01-01",
+            "expiry": "2026-12-31",
+            "status": "ACTIVE",
+            "date_of_loss": "2026-08-04",
+            "confirmed_by": "policy system of record",
+        },
+        "inspection_evidence": {
+            "token": "SS-9042",
+            "issued_out_of_band_by": "independent inspection network",
+            "verified_by_platform": True,
+            "inspection_date": "2026-08-10",
+            "scope": "units 12 to 20",
+            "assessed_usd": 63_000,
+        },
+        "platform_schedule": {
+            "source": "policy platform",
+            "unit_block_limit_usd": 150_000,
+            "remaining_aggregate_usd": 150_000,
+            "deductible_usd": 0,
+            "drawn_usd": 0,
+        },
+        "verified_file_findings": "File notes no excluded cause.",
     }
     facts.update(overrides)
     return facts
@@ -161,23 +184,8 @@ class ExclusionRuleSetTests(unittest.TestCase):
 class EligibilityGateAgentTests(unittest.TestCase):
     def setUp(self) -> None:
         self.executions: list[dict[str, Any]] = []
-
-        @tool
-        def confirm_eligibility(subject_id: str, eligibility_facts: dict[str, Any]) -> str:
-            """Confirm eligibility."""
-
-            self.executions.append({"tool": "confirm_eligibility", "subject_id": subject_id})
-            return "confirmed"
-
-        @tool
-        def bind_contract_terms(subject_id: str, eligibility_facts: dict[str, Any]) -> str:
-            """Bind contract terms."""
-
-            self.executions.append({"tool": "bind_contract_terms", "subject_id": subject_id})
-            return "bound"
-
         self.client = FakeClient()
-        self.tools = {"confirm_eligibility": confirm_eligibility, "bind_contract_terms": bind_contract_terms}
+        self.tools = {n: stub_tool(n, self.executions) for n in ("confirm_eligibility", "bind_contract_terms")}
         self.agent = EligibilityGateAgent(
             client=self.client,  # type: ignore[arg-type]
             tools=self.tools,
@@ -185,13 +193,15 @@ class EligibilityGateAgentTests(unittest.TestCase):
         )
 
     def _call(self, tool_name: str, facts: Any) -> Any:
-        return self.agent.execute(tool_name, {"subject_id": "APP-1", "eligibility_facts": facts})
+        return self.agent.execute(
+            tool_name, {"subject_id": "APP-1", "approved_amount_usd": 63_000.0, "eligibility_facts": facts}
+        )
 
     def test_eligible_subject_reaches_the_bundle_and_runs(self) -> None:
         command = self._call("confirm_eligibility", _facts())
 
         self.assertIsNone(command.update["governance_error"])
-        self.assertEqual(self.executions, [{"tool": "confirm_eligibility", "subject_id": "APP-1"}])
+        self.assertEqual([e["tool"] for e in self.executions], ["confirm_eligibility"])
         self.assertEqual(len(self.client.calls), 1)
         _, options = self.client.calls[0]
         self.assertEqual(options["bundle_ids"], [ELIGIBILITY_GATE_BUNDLE_ID])
@@ -220,10 +230,10 @@ class EligibilityGateAgentTests(unittest.TestCase):
     def test_missing_malformed_or_absent_facts_fail_closed_before_the_backend(self) -> None:
         arguments: dict[str, Any]
         for name, arguments in {
-            "no facts key": {"subject_id": "APP-1"},
-            "facts not an object": {"subject_id": "APP-1", "eligibility_facts": "all good"},
-            "missing fact": {"subject_id": "APP-1", "eligibility_facts": {"applicant_id": "APP-1"}},
-            "wrong type": {"subject_id": "APP-1", "eligibility_facts": _facts(age="forty")},
+            "no facts key": {"subject_id": "APP-1", "approved_amount_usd": 1.0},
+            "facts not an object": {"subject_id": "APP-1", "approved_amount_usd": 1.0, "eligibility_facts": "all good"},
+            "missing fact": {"subject_id": "APP-1", "approved_amount_usd": 1.0, "eligibility_facts": {"applicant_id": "APP-1"}},
+            "wrong type": {"subject_id": "APP-1", "approved_amount_usd": 1.0, "eligibility_facts": _facts(age="forty")},
         }.items():
             with self.subTest(name):
                 command = self.agent.execute("confirm_eligibility", arguments)
@@ -257,13 +267,91 @@ class EligibilityGateAgentTests(unittest.TestCase):
                 "messages": [],
                 "tool_invocation": {
                     "name": "confirm_eligibility",
-                    "arguments": {"subject_id": "APP-1", "eligibility_facts": _facts(age=5)},
+                    "arguments": {"subject_id": "APP-1", "approved_amount_usd": 1.0, "eligibility_facts": _facts(age=5)},
                     "tool_call_id": "g1",
                 },
             }
         )
         self.assertIn("R-MINOR", state["governance_error"])
         self.assertEqual(self.client.calls, [])
+
+    def test_both_tools_are_gated_by_the_same_claim_checks(self) -> None:
+        for tool_name in ("confirm_eligibility", "bind_contract_terms"):
+            with self.subTest(tool_name):
+                self.client.calls.clear()
+                self.executions.clear()
+                ok = self._call(tool_name, _facts())
+                self.assertIsNone(ok.update["governance_error"])
+                self.assertEqual(len(self.client.calls), 1)
+
+    def test_starved_claim_context_is_blocked_locally(self) -> None:
+        native = {k: v for k, v in _facts().items() if k not in (
+            "policy_system_record", "inspection_evidence", "platform_schedule", "verified_file_findings")}
+        full = _facts()
+        cases = {
+            "flat facts only": native,
+            "no policy record": {k: v for k, v in full.items() if k != "policy_system_record"},
+            "no inspection token": {k: v for k, v in full.items() if k != "inspection_evidence"},
+            "no schedule": {k: v for k, v in full.items() if k != "platform_schedule"},
+            "no file findings": {k: v for k, v in full.items() if k != "verified_file_findings"},
+            "bad date": _facts(policy_system_record={**full["policy_system_record"], "expiry": "31/12/2026"}),
+            "unverified flag is a string": _facts(
+                inspection_evidence={**full["inspection_evidence"], "verified_by_platform": "yes"}),
+            "zero assessed amount": _facts(inspection_evidence={**full["inspection_evidence"], "assessed_usd": 0}),
+        }
+        for name, facts in cases.items():
+            with self.subTest(name):
+                command = self._call("confirm_eligibility", facts)
+                self.assertIn("Claim evidence is incomplete or malformed", command.update["governance_error"])
+                self.assertEqual(self.client.calls, [])
+                self.assertEqual(self.executions, [])
+
+    def test_missing_approved_amount_is_blocked_locally(self) -> None:
+        command = self.agent.execute("confirm_eligibility", {"subject_id": "APP-1", "eligibility_facts": _facts()})
+        self.assertIn("Claim evidence is incomplete or malformed", command.update["governance_error"])
+        self.assertEqual(self.client.calls, [])
+
+    def test_deterministic_claim_checks_block_before_the_backend(self) -> None:
+        full = _facts()
+        record, inspection, schedule = full["policy_system_record"], full["inspection_evidence"], full["platform_schedule"]
+        cases = {
+            "policy not active": (_facts(policy_system_record={**record, "status": "LAPSED"}), 63_000.0, "not show the policy as active"),
+            "loss before term": (_facts(policy_system_record={**record, "date_of_loss": "2025-12-31"}), 63_000.0, "outside the confirmed policy term"),
+            "loss after term": (_facts(policy_system_record={**record, "date_of_loss": "2027-01-01"}), 63_000.0, "outside the confirmed policy term"),
+            "term inverted": (_facts(policy_system_record={**record, "expiry": "2025-01-01"}), 63_000.0, "expires before it takes effect"),
+            "inspection unverified": (_facts(inspection_evidence={**inspection, "verified_by_platform": False}), 63_000.0, "not been verified"),
+            "inspection before loss": (_facts(inspection_evidence={**inspection, "inspection_date": "2026-08-03"}), 63_000.0, "predates the loss"),
+            "over assessed": (full, 63_000.01, "exceeds the amount assessed"),
+            "over aggregate": (_facts(platform_schedule={**schedule, "remaining_aggregate_usd": 50_000}), 63_000.0, "scheduled limit or the remaining aggregate"),
+            "over sub-limit": (_facts(platform_schedule={**schedule, "unit_block_limit_usd": 60_000}), 63_000.0, "scheduled limit or the remaining aggregate"),
+        }
+        for name, (facts, amount, fragment) in cases.items():
+            with self.subTest(name):
+                command = self.agent.execute(
+                    "confirm_eligibility",
+                    {"subject_id": "APP-1", "approved_amount_usd": amount, "eligibility_facts": copy.deepcopy(facts)},
+                )
+                self.assertIn(fragment, command.update["governance_error"])
+                self.assertEqual(self.client.calls, [])
+                self.assertEqual(self.executions, [])
+
+    def test_boundary_values_and_a_written_endorsement_are_allowed(self) -> None:
+        full = _facts()
+        record, inspection = full["policy_system_record"], full["inspection_evidence"]
+        for name, facts in {
+            "loss on first day": _facts(policy_system_record={**record, "date_of_loss": "2026-01-01"},
+                                        inspection_evidence={**inspection, "inspection_date": "2026-01-01"}),
+            "loss on last day": _facts(policy_system_record={**record, "date_of_loss": "2026-12-31"},
+                                       inspection_evidence={**inspection, "inspection_date": "2026-12-31"}),
+            "inspection on loss day": _facts(inspection_evidence={**inspection, "inspection_date": "2026-08-04"}),
+            "endorsed grace period": _facts(
+                policy_system_record={**record, "date_of_loss": "2027-01-10", "written_endorsement": "END-77 grace"},
+                inspection_evidence={**inspection, "inspection_date": "2027-01-12"}),
+        }.items():
+            with self.subTest(name):
+                self.client.calls.clear()
+                self.assertIsNone(self._call("confirm_eligibility", facts).update["governance_error"])
+                self.assertEqual(len(self.client.calls), 1)
 
     def test_check_eligibility_runs_without_the_backend(self) -> None:
         self.assertFalse(self.agent.check_eligibility(_facts(age=1)).eligible)
@@ -277,7 +365,9 @@ class EligibilityGateAgentTests(unittest.TestCase):
             exclusion_rules=_rules(),
             facts_key="facts",
         )
-        command = agent.execute("confirm_eligibility", {"subject_id": "APP-1", "facts": _facts(age=3)})
+        command = agent.execute(
+            "confirm_eligibility", {"subject_id": "APP-1", "approved_amount_usd": 1.0, "facts": _facts(age=3)}
+        )
         self.assertIn("R-MINOR", command.update["governance_error"])
 
     def test_constructor_validation(self) -> None:
