@@ -58,9 +58,8 @@ def test_bind_contract_terms_with_full_claim_context_is_allowed(harness: Any, li
 
 
 def test_exclusion_shown_only_by_the_verified_file_is_blocked_live(harness: Any, live_client: SpacedClient) -> None:
-    facts = payloads.eligibility_facts(verified_file_findings=payloads.EXCLUDED_FILE_FINDINGS)
     _run(harness, live_client, "BLOCK(live): triggered exclusion, agent flag list empty (CEE-02)", "BLOCK",
-         "confirm_eligibility", payloads.claim(facts))
+         "confirm_eligibility", payloads.claim_with_excluded_file())
 
 
 def test_local_fail_closed_cases_never_reach_the_backend(harness: Any, live_client: SpacedClient) -> None:

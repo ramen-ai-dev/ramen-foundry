@@ -54,14 +54,8 @@ def test_clearance_asserted_only_by_the_requester_is_blocked_live(harness: Any, 
 
 
 def test_the_requesting_agent_as_an_approver_is_blocked_live(harness: Any, live_client: SpacedClient) -> None:
-    args = payloads.authorization_dual(40_000.0)
-    args["approvals"] = [
-        payloads.approval("fin-cfo-1", 40_000.0, role="CFO"),
-        payloads.approval("purchasing-agent-01", 40_000.0, role="AI purchasing agent (the requesting agent)"),
-    ]
-    args["agent_id"] = "purchasing-agent-01"
     _run(harness, live_client, "BLOCK(live): approver is the requesting agent (FACS-04)", "BLOCK",
-         "release_payment", args)
+         "release_payment", payloads.authorization_agent_as_approver())
 
 
 def test_local_fail_closed_cases_never_reach_the_backend(harness: Any, live_client: SpacedClient) -> None:

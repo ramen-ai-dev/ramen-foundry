@@ -74,6 +74,18 @@ def authorization_dual(amount: float = 40_000.0, **overrides: Any) -> dict[str, 
     return payload
 
 
+def authorization_agent_as_approver() -> dict[str, Any]:
+    """A dual-control payment where one of the two approvers is the requesting agent (FACS-04)."""
+
+    payload = authorization_dual(40_000.0)
+    payload["approvals"] = [
+        approval("fin-cfo-1", 40_000.0, role="CFO"),
+        approval("purchasing-agent-01", 40_000.0, role="AI purchasing agent (the requesting agent)"),
+    ]
+    payload["agent_id"] = "purchasing-agent-01"
+    return payload
+
+
 # ------------------------------------------------------------------- eligibility
 
 
@@ -126,6 +138,12 @@ EXCLUDED_FILE_FINDINGS = (
     "before the loss, a triggered exclusion."
 )
 
+def claim_with_excluded_file() -> dict[str, Any]:
+    """A claim whose verified file shows a triggered exclusion while the agent's flags are empty (CEE-02)."""
+
+    return claim(eligibility_facts(verified_file_findings=EXCLUDED_FILE_FINDINGS))
+
+
 # ------------------------------------------------------------------- provenance
 
 ARTIFACT_SHA256 = hashlib.sha256(b"kyc-onboarding-record-IND-5120-v1").hexdigest()
@@ -149,4 +167,27 @@ def evidence_call(step: str) -> str:
         },
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def submission(items: list[dict[str, Any]], **overrides: Any) -> dict[str, Any]:
+    """A provenance submission bound to the subject, record type and artifact."""
+
+    payload: dict[str, Any] = {
+        "record_type": RECORD_TYPE,
+        "subject_id": SUBJECT_ID,
+        "artifact_sha256": ARTIFACT_SHA256,
+        "evidence": items,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def batch_submission(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """One evidence set offered for a batch of subjects (CPE-02)."""
+
+    return submission(
+        items,
+        batch_subjects=[SUBJECT_ID, "IND-7777"],
+        note="one evidence set covers both subjects in this batch",
     )

@@ -12,6 +12,7 @@
   <a href="https://ramenai.dev">Platform</a> ·
   <a href="https://ramenai.dev/pricing">API keys</a> ·
   <a href="https://ramenai.dev/llms.txt">Architecture</a> ·
+  <a href="#core-architectures">Examples</a> ·
   <a href="https://github.com/ramen-ai-dev/ramen-ai-integrations">SDKs and integrations</a>
 </p>
 
@@ -32,6 +33,36 @@ Use the low-level nodes to govern an existing graph, or start with a domain temp
 - **provenance-gate** — regulated-record submissions on locally verified Schema V5 Ed25519 receipts.
 
 The package supplies governance boundaries and workflow structure; host applications retain ownership of credentials, model adapters, tools, infrastructure permissions, and human approvals. Policy enforcement supports compliance programs but does not by itself constitute legal advice or certification.
+
+## Core Architectures
+
+Four architectures cover the consequential actions an agent can take. Each has a runnable demo in [`examples/`](examples/) with three stages: a local fail-closed pre-check, a live BLOCK from the ramen-ai bundle, and a live ALLOW. Every live verdict carries a Schema V5 Ed25519 receipt that the demo verifies against the production keys.
+
+| Core Architecture | Template | Demo | What it shows |
+|---|---|---|---|
+| Financial & Authorization Gates | `AuthorizationGateAgent` | [`examples/authorization_gate_demo.py`](examples/authorization_gate_demo.py) | A $40k payment: one approver blocked locally, an AI agent as its own approver blocked by the bundle, two bound out-of-band approvals allowed |
+| Contractual & Eligibility Logic | `EligibilityGateAgent` | [`examples/eligibility_gate_demo.py`](examples/eligibility_gate_demo.py) | A claim approval: a local exclusion rule, an exclusion only the verified file reveals, and a fully evidenced approval |
+| Compliance & Provenance Traceability | `ProvenanceGateAgent` | [`examples/provenance_gate_demo.py`](examples/provenance_gate_demo.py) | A regulated filing: self-attestation and a tampered receipt blocked locally, one evidence set for a batch blocked by the bundle, bound receipts allowed with a derived verifier report |
+| Cyber-Physical Kinematic Governance | `IndustrialAutomationAgent` | [`examples/kinematic_gate_demo.py`](examples/kinematic_gate_demo.py) | A robot arm: malformed dispatches blocked by the payload contract, an aerosol canister onto a burner blocked, a collaborative transfer allowed |
+
+For the kinematic architecture, [`examples/benchmark_asimov_robotics.py`](examples/benchmark_asimov_robotics.py) runs the five-vector ASIMOV and RoboHarm benchmark, and [`examples/simulate_robotics_3d.py`](examples/simulate_robotics_3d.py) and [`examples/simulate_flagship_plunge.py`](examples/simulate_flagship_plunge.py) add MuJoCo simulations. The full index is in [`examples/README.md`](examples/README.md).
+
+### Run the demos
+
+The `examples/` directory ships in the source checkout and the sdist, not in the wheel.
+
+```bash
+git clone https://github.com/ramen-ai-dev/ramen-foundry.git
+cd ramen-foundry
+pip install -e .
+
+python examples/authorization_gate_demo.py     # Stage 1 runs with no key and no network
+
+export RAMEN_API_KEY="your-ramen-api-key"      # https://ramenai.dev/pricing
+python examples/authorization_gate_demo.py     # Stages 1 to 3 against api.ramenai.dev
+```
+
+The same two commands work for `eligibility_gate_demo.py`, `provenance_gate_demo.py` and `kinematic_gate_demo.py`. Each full run makes two to four live evaluations, exits 0 on the expected BLOCK and ALLOW, and exits 1 on any other result. Set `OPENAI_API_KEY` as well to use OpenAI BYOK; without it ramen-ai uses managed-provider inference. The tools in the demos are simulated and change nothing.
 
 ## Install
 
@@ -315,6 +346,8 @@ Use `agent.execute(tool_name, payload)` for direct evaluation or `agent.invoke({
 
 The policy evaluates represented evidence; Foundry does not query PLC/SIS hardware, certify operating envelopes, authenticate physical keys, validate MOC registries, or replace BPCS/SIF interlocks. Host tools must independently enforce local interlocks, least privilege, stale-telemetry rejection, network segmentation, human/physical authorization, operation IDs, and rollback-safe procedures.
 
+Run it: `python examples/kinematic_gate_demo.py` shows the `ManipulationDispatchPayload` pre-check, a live BLOCK and a live ALLOW. The five-vector benchmark below is `python examples/benchmark_asimov_robotics.py`.
+
 ### Physical AI & Robotics Safety Benchmark (ASIMOV & RoboHarm Evaluation)
 
 [Robocurve's RoboHarm benchmark](https://robocurve.org/roboharm/) (September 18, 2026) tests whether frontier robot policies refuse unsafe instructions. It covers five tasks on the same bimanual I2RT YAM arms: stabbing a baby doll, heating a can of compressed air, putting a screwdriver in a toaster, dropping a power bank in water, and mixing bleach with ammonia. Three policies ran each instruction 20 times: Anthropic's Claude Fable 5.1, OpenAI's GPT-6 Astra and Ai2's MolmoAct2. Human reviewers labelled every trial. GPT-6 Astra attempted 97 of its 100 trials and completed 60. Claude Fable 5.1 refused all 20 stabbing trials but none of the other 80. Model-level refusal is therefore inconsistent across tasks and cannot be the only control between a planner and an actuator. `IndustrialAutomationAgent` supplies a separate, un-bypassable execution boundary: every resolved `dispatch_manipulation` call must receive a verified policy release before the host tool can run.
@@ -409,11 +442,33 @@ Local fail-closed checks: evidence incomplete or malformed; amount above the per
 
 ```python
 from os import environ
+from langchain_core.tools import tool
 from ramen_ai import RamenClient
 from ramen_foundry import AuthorizationGateAgent
+
+@tool
+def release_payment(request_id: str, amount_usd: float, payee: str) -> str:
+    """Release a payment (simulated: records the call and moves no money)."""
+    return f"[simulated] released ${amount_usd:,.2f} to {payee} for {request_id}"
+
+payment = {
+    "request_id": "REQ-1001", "requested_by": "lab-agent-01", "amount_usd": 12_000.0,
+    "payee": "Tenbury Scientific", "payee_account": "ACCT-TEN-4401",
+    "cost_center": "Lab Operations", "fiscal_period": "FY2026-Q4", "spend_category": "supplies",
+    "platform_limits": {"source": "finance platform", "per_order_usd": 30_000,
+                        "per_vendor_cumulative_usd": 90_000, "dual_approval_threshold_usd": 50_000},
+    "erp_clearance": {"id": "BC-7701", "status": "OPEN", "cost_center": "Lab Operations",
+                      "fiscal_period": "FY2026-Q4", "spend_category": "supplies",
+                      "balance_usd": 14_000, "confirmed_by": "ERP system of record"},
+    "vendor_exposure": {"source": "finance platform", "vendor_group": "Tenbury Scientific",
+                        "open_pending_paid_usd": 21_000},
+    "approvals": [],
+}
 agent = AuthorizationGateAgent(client=RamenClient(environ["RAMEN_API_KEY"]), tools={"release_payment": release_payment})
-command = agent.execute("release_payment", spend_with_platform_context)
+command = agent.execute("release_payment", payment)
 ```
+
+The tool receives the parameters its schema declares; the whole `payment` is evaluated. Run the full three-stage demo with `python examples/authorization_gate_demo.py` (see [Core Architectures](#core-architectures)).
 
 ### eligibility-gate
 
@@ -428,6 +483,8 @@ command = agent.execute("release_payment", spend_with_platform_context)
 
 Local fail-closed checks run first, with no evaluation request and no tool execution: any `ExclusionRule` that hits (boolean `all_of` plus optional `any_of` over named facts, with strict types, so a missing, `None`, non-finite or wrong-typed fact blocks); incomplete or malformed claim evidence; a policy that is not active; a loss outside the confirmed term with no written endorsement; an unverified inspection, or one that predates the loss; and an approved amount above the assessed amount, the scheduled limit or the remaining aggregate. Block reasons name rules and fields and never echo fact values. A local pass is not a release: the bundle verdict and its receipt are still required, and a bundle block routes to human adjudication, not to a denial.
 
+Run it: `python examples/eligibility_gate_demo.py` (local exclusion, a live BLOCK for an exclusion only the verified file shows, and a live ALLOW).
+
 ### provenance-gate
 
 `ProvenanceGateAgent` permits `submit_filing` and `release_report`, for the record types the platform declares token-required (`token_required_record_types`, required). Arguments are `record_type`, `subject_id`, `artifact_sha256` and `evidence`: a list of `{"payload", "receipt"}` items, each a Schema V5 Ed25519 receipt for the exact payload text it was issued for, with an ALLOW verdict.
@@ -435,6 +492,8 @@ Local fail-closed checks run first, with no evaluation request and no tool execu
 Evidence is accepted only from Schema V5 receipts, verified locally against the pinned `ramen_pk_v1` key: signature, signed `payload_hash`, signed ALLOW verdict, a signed timestamp within `max_receipt_age_seconds` (default 24 hours), and a recorded call whose `arguments` carry the same `subject_id`, `record_type` and `artifact_sha256` as the submission. Receipt ids may not repeat. No stored lessons, remote records or lookup URIs are consulted.
 
 **No self-attestation.** The `verifier_report` the bundle evaluates is written by the template from the receipts it verified. A call that supplies its own `verifier_report`, `record_type_token_required` or `tokens_submitted_unmodified` is blocked. Schema V5 receipts are immutable signed statements with no revocation mechanism, so the derived report states them as not revoked and not superseded, and as current only while inside the age limit. LangChain passes a tool only the parameters its schema declares, so declare a `verifier_report` parameter if the tool should receive the derived report.
+
+Run it: `python examples/provenance_gate_demo.py` (self-attestation and a tampered receipt blocked locally, a batch blocked by the bundle, and a bound filing allowed).
 
 ### hrtech
 
@@ -684,7 +743,7 @@ from ramen_foundry import (
 
 ## Live integration tests
 
-`tests/live/` verifies the authorization, eligibility and provenance templates against the production bundles at `https://api.ramenai.dev`. The suite is opt-in and sends about 35 evaluations serially, with 2.5 s spacing and a back-off on HTTP 429. Each verdict case runs three times and passes on a two-of-three majority, because the evaluator is semantic. Every live receipt must also verify as Schema V5 Ed25519 under the production pinned keys.
+`tests/live/` verifies the authorization, eligibility and provenance templates against the production bundles at `https://api.ramenai.dev`. The suite is opt-in and sends about 45 evaluations serially, with 2.5 s spacing and a back-off on HTTP 429. Each verdict case runs three times and passes on a two-of-three majority. `tests/live/test_live_examples.py` also runs each gate demo once. Every live receipt must also verify as Schema V5 Ed25519 under the production pinned keys.
 
 ```bash
 export RAMEN_API_KEY="your-ramen-api-key"
@@ -711,6 +770,7 @@ A plain `pytest` run deselects them (`-m "not live"`).
 - [ramen-ai platform](https://ramenai.dev)
 - [Plans and API keys](https://ramenai.dev/pricing)
 - [Machine-readable architecture and integration context](https://ramenai.dev/llms.txt)
+- [Runnable examples](https://github.com/ramen-ai-dev/ramen-foundry/tree/master/examples)
 - [Python SDK and integrations](https://github.com/ramen-ai-dev/ramen-ai-integrations)
 - [ramen-foundry source](https://github.com/ramen-ai-dev/ramen-foundry)
 

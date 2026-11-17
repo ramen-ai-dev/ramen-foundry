@@ -55,14 +55,7 @@ def harness(live_client: SpacedClient) -> tuple[ProvenanceGateAgent, list[dict[s
 
 
 def _submission(items: list[dict[str, Any]], **overrides: Any) -> dict[str, Any]:
-    submission: dict[str, Any] = {
-        "record_type": payloads.RECORD_TYPE,
-        "subject_id": payloads.SUBJECT_ID,
-        "artifact_sha256": payloads.ARTIFACT_SHA256,
-        "evidence": items,
-    }
-    submission.update(overrides)
-    return submission
+    return payloads.submission(items, **overrides)
 
 
 def _run(harness: Any, live_client: SpacedClient, scenario: str, expected: str, tool: str,
@@ -99,11 +92,7 @@ def test_the_tool_receives_the_report_the_backend_evaluated(harness: Any, live_c
 def test_batch_submission_without_per_subject_evidence_is_blocked_live(
     harness: Any, live_client: SpacedClient, evidence: Any
 ) -> None:
-    args = _submission(
-        evidence["allow"],
-        batch_subjects=[payloads.SUBJECT_ID, "IND-7777"],
-        note="one evidence set covers both subjects in this batch",
-    )
+    args = payloads.batch_submission(evidence["allow"])
     _run(harness, live_client, "BLOCK(live): one evidence set for a batch of subjects (CPE-02)", "BLOCK",
          "submit_filing", args)
 
