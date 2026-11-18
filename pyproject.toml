@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ramen-foundry"
-version = "0.2.6"
-description = "LangGraph governance nodes and policy-bound action-gate templates (authorization, eligibility, provenance, industrial, IT) powered by ramen-ai."
+version = "0.2.7"
+description = "LangGraph governance nodes, policy-bound action-gate templates (authorization, eligibility, provenance, industrial, IT) and dataset filtration, powered by ramen-ai."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+license-files = ["LICENSE"]
 dependencies = [
-    "ramen-ai-core>=0.3.2,<0.4.0",
+    "ramen-ai-core>=0.3.3,<0.5.0",
     "httpx>=0.27.0,<1.0.0",
     "cryptography>=42.0.0",
     "langgraph==1.2.11",
@@ -20,6 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+data = [
+    "pandas>=2.2.3,<3.0.0",
+]
 credit-benchmark = [
     "certifi==2026.7.22",
     "numpy==2.2.5",
@@ -39,6 +43,17 @@ simulation = [
 Homepage = "https://ramenai.dev"
 Documentation = "https://ramenai.dev/llms.txt"
 Repository = "https://github.com/ramen-ai-dev/ramen-foundry"
+
+[tool.hatch.build.targets.sdist]
+# The flagship simulation meshes and textures are about 22 MB. The wheel never
+# contained them; keep them out of the sdist too. The simulation tests skip
+# themselves when the meshes are absent.
+exclude = [
+    "examples/assets",
+    "recordings",
+    "dist",
+    "agent_memory.json",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["ramen_foundry"]

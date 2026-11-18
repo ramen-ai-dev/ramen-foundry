@@ -1,0 +1,27 @@
+name: ramen-foundry tests
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    name: pytest (py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install ramen-foundry with the data extra
+        run: pip install -e ".[data]" pytest
+      - name: Run the offline suite
+        # Live tests are deselected by default (-m "not live"). Tests that need
+        # the simulation or credit-benchmark extras skip themselves.
+        run: python -m pytest -q

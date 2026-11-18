@@ -71,7 +71,7 @@ from ramen_foundry.core.memory import fingerprint_task
 from ramen_foundry.core.steer_node import REFLECTION_HEADER
 from ramen_foundry.templates.fintech import CREDIT_ADVERSE_ACTION_POLICY_ID
 
-DEFAULT_FORGE_URL = "https://ramen-forge.ramenai.workers.dev"
+DEFAULT_FORGE_URL = "https://forge.ramenai.dev"
 INTEGRATIONS_ENV_PATH = Path(__file__).resolve().parents[2] / "ramen-ai-integrations" / ".env"
 FORGE_DOMAIN = "fintech"
 PLANNER_NODE = "planner"

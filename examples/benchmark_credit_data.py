@@ -205,7 +205,8 @@ def _model_hash(model: Any, transformed_features: list[str]) -> str:
         separators=(",", ":"),
     ).encode()
     model_bytes = bytes(model.get_booster().save_raw(raw_format="json"))
-    return f"sha256:{hashlib.sha256(manifest + b'\0' + model_bytes).hexdigest()}"
+    digest = hashlib.sha256(manifest + b"\0" + model_bytes).hexdigest()
+    return f"sha256:{digest}"
 
 
 def build_real_credit_evidence(

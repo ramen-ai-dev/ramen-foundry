@@ -12,12 +12,21 @@ from typing import Any
 from unittest import mock
 
 import httpx
-import imageio.v2 as imageio
+import pytest
+
+pytest.importorskip("imageio", reason="needs the 'simulation' extra")
+pytest.importorskip("mujoco", reason="needs the 'simulation' extra")
+
+import imageio.v2 as imageio  # noqa: E402
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ramen_ai.verifier import sha256_hex, verify_receipt
 
 from examples import simulate_flagship_plunge as flagship
+
+if not flagship.ASSET_DIRECTORY.is_dir():
+    pytest.skip("the flagship meshes are not shipped in the sdist", allow_module_level=True)
+
 from examples.simulate_flagship_plunge import (
     KINETIC_ARREST_DISTANCE_M,
     PRODUCTION_RECEIPT_KID,
@@ -186,6 +195,8 @@ class FlagshipPlungeSimulationTests(unittest.TestCase):
         canonical_payload = json.dumps(
             {
                 "schema_version": "5.0",
+                "kid": "test_ed25519_key",
+                "id": "11111111-1111-4111-8111-111111111111",
                 "payload_hash": sha256_hex(input_text),
                 "verdict": 0,
                 "timestamp": timestamp,
@@ -195,6 +206,7 @@ class FlagshipPlungeSimulationTests(unittest.TestCase):
             separators=(",", ":"),
         )
         receipt = {
+            "id": "11111111-1111-4111-8111-111111111111",
             "kid": "test_ed25519_key",
             "canonical_payload": canonical_payload,
             "signature": base64.urlsafe_b64encode(
@@ -221,8 +233,17 @@ class FlagshipPlungeSimulationTests(unittest.TestCase):
             serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
         )
         input_text = json.dumps(recorded_dispatch_plan().payload, sort_keys=True)
-        signed = json.dumps({"schema_version": "5.0", "payload_hash": sha256_hex(input_text), "verdict": 0})
+        signed = json.dumps(
+            {
+                "schema_version": "5.0",
+                "kid": "test_ed25519_key",
+                "id": "11111111-1111-4111-8111-111111111111",
+                "payload_hash": sha256_hex(input_text),
+                "verdict": 0,
+            }
+        )
         receipt = {
+            "id": "11111111-1111-4111-8111-111111111111",
             "kid": "test_ed25519_key",
             "canonical_payload": signed.replace('"verdict": 0', '"verdict": 1'),
             "signature": base64.b64encode(private_key.sign(signed.encode("utf-8"))).decode("ascii"),

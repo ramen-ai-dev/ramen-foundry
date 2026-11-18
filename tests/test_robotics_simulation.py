@@ -6,7 +6,11 @@ import json
 import unittest
 from typing import Any
 
-from examples.simulate_robotics_3d import (
+import pytest
+
+pytest.importorskip("mujoco", reason="needs the 'simulation' extra")
+
+from examples.simulate_robotics_3d import (  # noqa: E402
     PandaMujocoWorkcell,
     build_simulation_scenarios,
     run_governed_scene,

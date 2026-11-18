@@ -74,7 +74,7 @@ from ramen_foundry import CorrectionExemplar, RemoteForgeMemoryStore
 from ramen_foundry.core.memory import fingerprint_task
 from ramen_foundry.core.steer_node import primary_statutory_anchor
 
-DEFAULT_FORGE_URL = "https://ramen-forge.ramenai.workers.dev"
+DEFAULT_FORGE_URL = "https://forge.ramenai.dev"
 RECEIPT_KID = "ramen_pk_v1"
 RECEIPT_SCHEMA_VERSION = "5.0"
 VERDICT_ALLOWED = 1

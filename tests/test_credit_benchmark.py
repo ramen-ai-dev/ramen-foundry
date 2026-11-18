@@ -6,6 +6,8 @@ import json
 import unittest
 from typing import Any
 
+import pytest
+
 from langchain_core.tools import tool
 
 from examples.benchmark_credit_data import (
@@ -139,8 +141,10 @@ class CreditBenchmarkTests(unittest.TestCase):
     def test_complete_model_path_is_deterministic_and_excludes_proxy_fields(self) -> None:
         from types import SimpleNamespace
 
-        import numpy as np
-        import pandas as pd
+        for module in ("shap", "sklearn", "xgboost"):
+            pytest.importorskip(module, reason="needs the 'credit-benchmark' extra")
+        np = pytest.importorskip("numpy")
+        pd = pytest.importorskip("pandas")
 
         rng = np.random.default_rng(42)
         row_count = 160

@@ -31,6 +31,7 @@ Use the low-level nodes to govern an existing graph, or start with a domain temp
 - **authorization-gate** — corporate-spend authorization: ERP budget clearance, platform limits, vendor exposure, and bound dual approvals.
 - **eligibility-gate** — contract and claim eligibility: local deterministic exclusions plus platform-confirmed claim evidence.
 - **provenance-gate** — regulated-record submissions on locally verified Schema V5 Ed25519 receipts.
+- **dataset filtration** (`ramen_foundry.data`) — row-by-row governance of pandas DataFrames and CSV files before they reach a RAG corpus or training set.
 
 The package supplies governance boundaries and workflow structure; host applications retain ownership of credentials, model adapters, tools, infrastructure permissions, and human approvals. Policy enforcement supports compliance programs but does not by itself constitute legal advice or certification.
 
@@ -68,6 +69,7 @@ The same two commands work for `eligibility_gate_demo.py`, `provenance_gate_demo
 
 ```bash
 pip install ramen-foundry
+pip install "ramen-foundry[data]"   # adds pandas for dataset filtration
 ```
 
 Python 3.10 or newer is required. Obtain a ramen-ai API key at [ramenai.dev/pricing](https://ramenai.dev/pricing), then provide credentials through your environment or secret manager:
@@ -179,7 +181,7 @@ Exemplars store tool arguments verbatim, including any signatures or account ide
 
 ### Cloud Memory Synchronization (ramen forge / MOM)
 
-`RemoteForgeMemoryStore` implements `BaseEpisodicMemoryStore` against a [ramen forge](https://ramen-forge.ramenai.workers.dev) service, so a repair learned by one agent can be recalled by another before its first tool dispatch.
+`RemoteForgeMemoryStore` implements `BaseEpisodicMemoryStore` against a [ramen forge](https://forge.ramenai.dev) service, so a repair learned by one agent can be recalled by another before its first tool dispatch.
 
 | Level | Tier | Where it lives | Scope |
 |---|---|---|---|
@@ -560,6 +562,25 @@ Query text and parameters are included in the governed payload. Destructive oper
 
 Scraped pages, documents, and search results are untrusted input. Requests induced by embedded instructions—such as reading `.env`, collecting cloud credentials, curling secrets to an attacker, or publishing private data—are evaluated against OWASP ASI06 and secret-exfiltration controls before the capability can execute. Do not give research tools ambient access to secrets.
 
+## Dataset filtration
+
+`ramen_foundry.data` evaluates every row of a pandas DataFrame or CSV file through the ramen ai semantic firewall before it can enter a retrieval corpus, training set, or analytics store. It replaces the standalone `ramen-data-filter` package; the API is unchanged and the import path is now `ramen_foundry.data`. It needs the optional `data` extra and does not import LangGraph.
+
+```python
+import pandas as pd
+from ramen_foundry.data import FiltrationMode, filter_dataframe
+
+result = filter_dataframe(
+    pd.DataFrame([{"document_id": "doc-1", "content": "Approved public documentation"}]),
+    mode=FiltrationMode.STRICT_EXCLUSION,
+    bundle_ids=["ramen__shield_core_it"],
+)
+clean_records = result.dataframe
+print(result.audit_log[["row_index", "verdict", "receipt_verified"]])
+```
+
+Strict exclusion drops blocked rows. Semantic imputation hands each blocked row and its steering string to a callback you supply, and fails closed on any callback error. See [dataset filtration](docs/data-filtration.md) for the full API, BYOK configuration and bundle guidance, and the [just-in-time training pipeline guide](docs/data-jit-training-pipeline.md) for PyTorch and TensorFlow patterns.
+
 ## Operational agent API
 
 All three Shield agents share the same constructor and execution shape:
@@ -683,6 +704,9 @@ Semantic governance is not a replacement for OS permissions, sandboxing, read-on
 
 ## Public exports
 
+Top-level names load lazily on first access, so `import ramen_foundry` does not import LangGraph. Dataset filtration lives in `ramen_foundry.data` and is not re-exported here.
+
+
 ```python
 from ramen_foundry import (
     AUTHORIZATION_GATE_BUNDLE_ID,
@@ -757,13 +781,14 @@ A plain `pytest` run deselects them (`-m "not live"`).
 | Package | Constraint |
 |---|---:|
 | Python | `>=3.10` |
-| `ramen-ai-core` | `>=0.3.2,<0.4.0` |
+| `ramen-ai-core` | `>=0.3.3,<0.5.0` |
 | `httpx` | `>=0.27.0,<1.0.0` |
 | `cryptography` | `>=42.0.0` |
 | `langgraph` | `==1.2.11` |
 | `langchain-core` | `==1.6.0` |
 | `pydantic` | `>=2.10.0,<3.0.0` |
 | `typing-extensions` | `>=4.12.2` |
+| `pandas` (optional `data` extra) | `>=2.2.3,<3.0.0` |
 
 ## Resources
 

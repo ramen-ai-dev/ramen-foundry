@@ -264,7 +264,7 @@ class RecordTests(unittest.TestCase):
 class ConstructorTests(unittest.TestCase):
     def test_defaults(self) -> None:
         store = RemoteForgeMemoryStore()
-        self.assertEqual(store.base_url, "https://ramen-forge.ramenai.workers.dev")
+        self.assertEqual(store.base_url, "https://forge.ramenai.dev")
         self.assertEqual(store.domain, "fintech")
         self.assertEqual(store.timeout_sec, 5.0)
         self.assertIsNone(store.write_token)

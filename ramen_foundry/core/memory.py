@@ -466,7 +466,7 @@ class RemoteForgeMemoryStore(BaseEpisodicMemoryStore):
 
     def __init__(
         self,
-        base_url: str = "https://ramen-forge.ramenai.workers.dev",
+        base_url: str = "https://forge.ramenai.dev",
         write_token: str | None = None,
         domain: str = "fintech",
         timeout_sec: float = 5.0,
