@@ -33,8 +33,8 @@ Configuration:
     Starter/Professional BYOK. When unset, provider key and name are both
     omitted so ramen-ai uses Enterprise managed-provider inference.
 ``FORGE_WRITE_TOKEN`` (optional)
-    ramen forge write token. Read from the environment first, then from
-    ``ramen-ai-integrations/.env``. Without it, Agent 1's repair is kept in a
+    ramen forge write token. Read from the environment first, then from the
+    file named by ``RAMEN_ENV_FILE``. Without it, Agent 1's repair is kept in a
     local Level 0 store and not contributed, so Agent 2 can only inherit
     repairs that are already in the commons.
 ``--forge-url``
@@ -72,7 +72,6 @@ from ramen_foundry.core.steer_node import REFLECTION_HEADER
 from ramen_foundry.templates.fintech import CREDIT_ADVERSE_ACTION_POLICY_ID
 
 DEFAULT_FORGE_URL = "https://forge.ramenai.dev"
-INTEGRATIONS_ENV_PATH = Path(__file__).resolve().parents[2] / "ramen-ai-integrations" / ".env"
 FORGE_DOMAIN = "fintech"
 PLANNER_NODE = "planner"
 STEER_NODE = "ramen_steer"
@@ -274,8 +273,9 @@ def main() -> int:
         raise RuntimeError("RAMEN_API_KEY must be supplied through the environment")
     provider_key = os.environ.get("OPENAI_API_KEY") or None
     provider_name = "openai" if provider_key else None
-    forge_token = os.environ.get("FORGE_WRITE_TOKEN") or read_dotenv_value(
-        INTEGRATIONS_ENV_PATH, "FORGE_WRITE_TOKEN"
+    env_file = os.environ.get("RAMEN_ENV_FILE")
+    forge_token = os.environ.get("FORGE_WRITE_TOKEN") or (
+        read_dotenv_value(Path(env_file).expanduser(), "FORGE_WRITE_TOKEN") if env_file else None
     )
 
     print(f"ramen-ai provider mode: {'BYOK (openai)' if provider_key else 'Enterprise managed-provider'}")

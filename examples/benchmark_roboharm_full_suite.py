@@ -25,8 +25,8 @@ Planner modes:
 Policy evaluation always runs live. ``RAMEN_API_KEY`` is required; when
 ``OPENAI_API_KEY`` is present it is forwarded as OpenAI BYOK, otherwise the
 gate uses managed-provider mode. Credentials come from the process
-environment, then a local ``.env``, then the sibling ramen-ai-integrations
-``.env``. The host tool is a canary and never communicates with a robot.
+environment, then the checkout's ``.env``, then the file named by
+``RAMEN_ENV_FILE``. The host tool is a canary and never communicates with a robot.
 
 The exit status is 0 only when the run passes: every hazardous scenario
 intercepted, zero canary dispatches on blocked steps, every receipt verified,
@@ -45,14 +45,6 @@ from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
 from typing import Any
-import os
-
-# If not running under the repository virtual environment, re-exec under it if available.
-_VENV_DIR = Path(__file__).resolve().parents[1] / ".venv"
-if _VENV_DIR.is_dir() and Path(sys.prefix).resolve() != _VENV_DIR.resolve():
-    _VENV_PYTHON = _VENV_DIR / "bin" / "python3"
-    if _VENV_PYTHON.is_file():
-        os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON), *sys.argv])
 
 import httpx
 from langchain_core.tools import BaseTool, tool
@@ -82,7 +74,6 @@ EXAMPLES_DIR = Path(__file__).resolve().parent
 TRACE_PATH = EXAMPLES_DIR / "traces" / "roboharm_gpt-4o-mini.json"
 REPORT_PATH = EXAMPLES_DIR / "ROBOHARM_BENCHMARK_REPORT.md"
 POLICY_ISOLATED_REPORT_PATH = EXAMPLES_DIR / "ROBOHARM_POLICY_ISOLATED_REPORT.md"
-INTEGRATIONS_ENV_PATH = EXAMPLES_DIR.parents[1] / "ramen-ai-integrations" / ".env"
 
 ROBOHARM_URL = "https://robocurve.org/roboharm/"
 ROBOHARM_PUBLISHED = "September 18, 2026"
@@ -1068,7 +1059,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     report_path = arguments.report or report_default
 
-    environment = load_environment_credentials(shared_env_path=INTEGRATIONS_ENV_PATH)
+    environment = load_environment_credentials()
     api_key = environment.get("RAMEN_API_KEY")
     if not api_key:
         raise RuntimeError("RAMEN_API_KEY must be supplied through the environment or a .env file")

@@ -39,7 +39,7 @@ Security bundle.
 ## Configuration / BYOK
 
 ```bash
-export RAMEN_API_KEY=ramen_ak_...   # required
+export RAMEN_API_KEY=ramen_ak_...   # required, except with trial=True
 export OPENAI_API_KEY=sk-...        # Starter/Professional BYOK
 ```
 
@@ -184,13 +184,22 @@ output is never returned or written.
 | `policy_ids` | `Sequence[str]` | Explicit policy UUIDs. May be combined with bundles. |
 | `remediable_columns` | `Sequence[str]` | Optional guard limiting which columns the healing callback may change. |
 | `healing_callback` | `Callable[[dict, str], dict] \| None` | Optional blocked-row healer. Without it, blocked rows are strictly excluded. |
-| `client` | `RamenClient` | Optional injected client, primarily for controlled runtimes and tests. |
+| `client` | `RamenClient \| TrialComplianceClient` | Optional injected client, primarily for controlled runtimes and tests. |
 | `api_key` | `str` | Runtime override; defaults to `RAMEN_API_KEY`. |
+| `trial` | `bool` | `True` evaluates on the keyless public trial instead of an API key (see below). Default `False`. |
 | `provider_key` | `str` | BYOK override; defaults to `OPENAI_API_KEY`. |
 | `provider_name` | `str` | Optional BYOK provider routing hint. |
 | `context` | `dict[str, str]` | Additional audit metadata. |
 | `base_url` | `str` | ramen ai API base URL. |
 | `timeout` | `float` | HTTP timeout in seconds. |
+
+### Keyless trial
+
+With no API key, `trial=True` (or `python examples/filter_dataset.py --trial`) sends each row to the public trial (`RamenClient.trial()`, `POST /api/v1/paas/try`) through `ramen_foundry.TrialComplianceClient`. It reads no credentials and sends none. The trial evaluates one bundle per request, allows about 10 requests per day per network, and rejects a request body over 2,048 bytes, so a row must serialize to well under 2,000 bytes once JSON-escaped. `policy_ids` raise `ValueError`; `context`, `provider_key` and `provider_name` are not sent. After the first row, filtration stops early if the remaining allowance cannot cover the rest of the file.
+
+### Errors
+
+`FiltrationError` messages name the failing row position and the underlying cause, for example `ramen-ai evaluation failed for row position 3: TrialLimitError: The keyless trial allowance is used up (scope: network). It resets at ...`. The cause text is clipped to 300 characters and has credentials removed; the original exception stays available as `__cause__`. A healing-callback failure names only the exception type, because callback messages often quote the row.
 
 ### `filter_csv(source_path, destination_path, **kwargs) -> FiltrationResult`
 

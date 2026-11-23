@@ -33,6 +33,7 @@ DEFAULT_MIN_EVIDENCE = 1
 MAX_EVIDENCE_ITEMS = 50
 DEFAULT_MAX_RECEIPT_AGE_SECONDS = 86_400.0
 _FUTURE_SKEW_SECONDS = 300.0
+TRIAL_RECEIPT_PREFIX = "trial_"
 
 # Keys only this template may write. A caller that supplies one is attempting self-attestation.
 DERIVED_KEYS = frozenset({"verifier_report", "record_type_token_required", "tokens_submitted_unmodified"})
@@ -64,6 +65,10 @@ class ReceiptEvidenceVerifier:
       ``arguments`` of the evaluated call that the payload records. That is how a
       receipt is bound to a subject, a record type and an artifact.
 
+    Receipts issued by the keyless public trial carry ids that start with
+    ``trial_``. They are rejected unless ``allow_trial_receipts`` is true, so that
+    evidence comes from authenticated evaluations by default.
+
     ``public_keys`` maps key ids to base64 DER Ed25519 keys. ``None`` uses the
     production keys shipped with ``ramen-ai-core``; override only in tests.
     """
@@ -74,7 +79,11 @@ class ReceiptEvidenceVerifier:
         *,
         max_age_seconds: float = DEFAULT_MAX_RECEIPT_AGE_SECONDS,
         clock: Callable[[], float] = time.time,
+        allow_trial_receipts: bool = False,
     ) -> None:
+        if not isinstance(allow_trial_receipts, bool):
+            raise ValueError("allow_trial_receipts must be True or False")
+        self._allow_trial_receipts = allow_trial_receipts
         if (
             isinstance(max_age_seconds, bool)
             or not isinstance(max_age_seconds, (int, float))
@@ -112,6 +121,13 @@ class ReceiptEvidenceVerifier:
         receipt_id, kid, stamp = signed.get("id"), signed.get("kid"), signed.get("timestamp")
         if not isinstance(receipt_id, str) or not receipt_id:
             return EvidenceResult.rejected("the signed receipt has no id"), None
+        if not self._allow_trial_receipts and receipt_id.lower().startswith(TRIAL_RECEIPT_PREFIX):
+            return (
+                EvidenceResult.rejected(
+                    "the receipt was issued by the keyless trial; pass allow_trial_receipts=True to accept it"
+                ),
+                None,
+            )
         issued = _parse_timestamp(stamp)
         if issued is None:
             return EvidenceResult.rejected("the signed receipt has no usable timestamp"), None
@@ -179,6 +195,9 @@ class ProvenanceGateAgent(GovernedToolAgent):
     The report is added to the arguments the tool receives, so tools may declare
     a ``verifier_report`` parameter or ignore it.
 
+    Receipts issued by the keyless public trial (ids starting ``trial_``) are not
+    accepted as evidence unless ``allow_trial_receipts=True``.
+
     Only Schema V5 Ed25519 receipts count as evidence. There is deliberately no
     way to substitute another verifier, and no stored or remote lesson or lookup
     is consulted.
@@ -197,6 +216,7 @@ class ProvenanceGateAgent(GovernedToolAgent):
         min_evidence: int = DEFAULT_MIN_EVIDENCE,
         max_receipt_age_seconds: float = DEFAULT_MAX_RECEIPT_AGE_SECONDS,
         public_keys: Mapping[str, str] | None = None,
+        allow_trial_receipts: bool = False,
         provider_key: str | None = None,
         provider_name: str | None = None,
     ) -> None:
@@ -213,7 +233,11 @@ class ProvenanceGateAgent(GovernedToolAgent):
             raise ValueError("token_required_record_types must contain only non-blank strings")
         self._record_types = record_types
         self._min_evidence = min_evidence
-        self._verifier = ReceiptEvidenceVerifier(public_keys, max_age_seconds=max_receipt_age_seconds)
+        self._verifier = ReceiptEvidenceVerifier(
+            public_keys,
+            max_age_seconds=max_receipt_age_seconds,
+            allow_trial_receipts=allow_trial_receipts,
+        )
         self._max_age = float(max_receipt_age_seconds)
         super().__init__(
             client=client,

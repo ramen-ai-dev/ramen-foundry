@@ -5,16 +5,19 @@ live ``ramen__industrial_iot_actuation_invariance`` bundle. Its host tool is a
 canary only: it records an approved dispatch without communicating with a
 robot. Blocked scenarios must never invoke that canary.
 
-The benchmark requires ``RAMEN_API_KEY``. It first reads the foundry checkout's
-``.env`` when present; otherwise it reads the integrations checkout's shared
-``.env``. When ``OPENAI_API_KEY`` is present, evaluations use OpenAI BYOK;
-otherwise they use the ramen-ai managed-provider mode.
+The benchmark requires ``RAMEN_API_KEY``, read from the environment, then from the
+checkout's ``.env``, then from the file named by ``RAMEN_ENV_FILE``. When
+``OPENAI_API_KEY`` is present, evaluations use OpenAI BYOK; otherwise they use the
+ramen-ai managed-provider mode. Without a key, ``examples/kinematic_gate_demo.py --trial``
+runs a short version of this check against the keyless public trial.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import textwrap
+import time
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +55,7 @@ class BenchmarkOutcome:
     receipt_kid: str
     receipt_verified: bool
     steering: str
+    latency_ms: float | None = None
 
 
 class RecordingRamenClient(RamenClient):
@@ -60,9 +64,12 @@ class RecordingRamenClient(RamenClient):
     def __init__(self, api_key: str) -> None:
         super().__init__(api_key, base_url=API_BASE_URL)
         self.evaluations: list[dict[str, Any]] = []
+        self.latencies_ms: list[float] = []
 
     def evaluate_compliance(self, input_text: str, **kwargs: Any) -> dict[str, Any]:
+        started = time.monotonic()
         result = super().evaluate_compliance(input_text, **kwargs)
+        self.latencies_ms.append((time.monotonic() - started) * 1000)
         self.evaluations.append(result)
         return result
 
@@ -263,6 +270,7 @@ def run_benchmark_cases(
         )
         if not client.evaluations:
             raise AssertionError("governance client returned no evaluation")
+        latencies = getattr(client, "latencies_ms", None)
         metadata = assert_verified_live_outcome(
             client.evaluations[-1],
             expected_allowed=case.expected_allowed,
@@ -288,33 +296,55 @@ def run_benchmark_cases(
                 receipt_kid=metadata["kid"],
                 receipt_verified=True,
                 steering=metadata["steering"] or "—",
+                latency_ms=latencies[-1] if latencies else None,
             )
         )
     return outcomes
 
 
-def format_execution_table(outcomes: Sequence[BenchmarkOutcome]) -> str:
-    """Render live policy decisions, receipt verification, and steering compactly."""
+STEERING_WIDTH = 56
+LABEL_WIDTH = 40
 
-    headers = ("Scenario", "Decision", "Receipt", "Steering instruction")
-    rows = [
-        (
-            outcome.label,
-            f"{outcome.decision} verified={outcome.receipt_verified} kid={outcome.receipt_kid}",
-            "Schema V5 Ed25519",
-            " ".join(outcome.steering.split()),
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Wrap ``text`` to ``width`` columns, always returning at least one line."""
+    return textwrap.wrap(" ".join(text.split()), width=width) or [""]
+
+
+def format_execution_table(outcomes: Sequence[BenchmarkOutcome]) -> str:
+    """Render decisions, receipt verification, latency and steering with wrapped cells."""
+    headers = ("Scenario", "Decision", "Receipt", "Latency", "Steering instruction")
+    rows: list[list[list[str]]] = []
+    for outcome in outcomes:
+        rows.append(
+            [
+                _wrap(outcome.label, LABEL_WIDTH),
+                [
+                    outcome.decision,
+                    f"verified={outcome.receipt_verified}",
+                    f"kid={outcome.receipt_kid}",
+                ],
+                ["Schema V5 Ed25519"],
+                [f"{outcome.latency_ms:.0f} ms" if outcome.latency_ms is not None else "-"],
+                _wrap(outcome.steering, STEERING_WIDTH),
+            ]
         )
-        for outcome in outcomes
-    ]
     widths = [
-        max(len(row[index]) for row in (headers, *rows)) for index in range(len(headers))
+        max(len(headers[index]), *(len(line) for row in rows for line in row[index]))
+        for index in range(len(headers))
     ]
     rule = "+".join("-" * (width + 2) for width in widths)
 
-    def render(row: Sequence[str]) -> str:
-        return "|".join(f" {value.ljust(width)} " for value, width in zip(row, widths, strict=True))
+    def render(cells: Sequence[str]) -> str:
+        return "|".join(f" {value.ljust(width)} " for value, width in zip(cells, widths, strict=True))
 
-    return "\n".join((rule, render(headers), rule, *(render(row) for row in rows), rule))
+    lines = [rule, render(headers), rule]
+    for row in rows:
+        height = max(len(cell) for cell in row)
+        for line in range(height):
+            lines.append(render([cell[line] if line < len(cell) else "" for cell in row]))
+        lines.append(rule)
+    return "\n".join(lines)
 
 
 def main() -> None:

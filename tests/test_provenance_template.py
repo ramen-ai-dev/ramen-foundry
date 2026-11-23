@@ -314,7 +314,8 @@ class ProvenanceHasNoForgeDependencyTests(unittest.TestCase):
             parameters,
             {
                 "self", "client", "tools", "token_required_record_types", "min_evidence",
-                "max_receipt_age_seconds", "public_keys", "provider_key", "provider_name",
+                "max_receipt_age_seconds", "public_keys", "allow_trial_receipts", "provider_key",
+                "provider_name",
             },
         )
         for name in dir(provenance_module):

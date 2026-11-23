@@ -22,6 +22,7 @@ The filing tool is simulated: it records the submission and files nothing.
 Run from the repository root::
 
     python examples/provenance_gate_demo.py                      # Stage 1 only
+    python examples/provenance_gate_demo.py --trial              # Stage 1 only: the evidence is over the trial's 2,048-byte limit
     RAMEN_API_KEY=... python examples/provenance_gate_demo.py    # all stages
 """
 
@@ -30,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.tools import tool
@@ -61,6 +63,12 @@ except ModuleNotFoundError:  # pragma: no cover - direct-script import layout
     )
 
 TITLE = "Provenance gate: Schema V5 receipts as evidence, derived verifier report"
+SCRIPT = "examples/provenance_gate_demo.py"
+# Stage 2 and 3 submit the derived verifier report and the evidence receipts, about 3,000 bytes.
+TRIAL_STAGE_ONE_ONLY_REASON = (
+    "the evidence (Schema V5 receipts plus the derived verifier report) is about 3,000 bytes, "
+    "over the keyless trial's 2,048-byte request limit."
+)
 RECORD_TYPE = "KYC_CLEARANCE"
 SUBJECT_ID = "IND-5120"
 ARTIFACT_SHA256 = hashlib.sha256(b"kyc-onboarding-record-IND-5120-v1").hexdigest()
@@ -191,8 +199,14 @@ def run(client: GateRecordingClient, *, live: bool = True, provider: dict[str, s
     return outcomes
 
 
-def main() -> int:
-    return gate_main(TITLE, run)
+def main(argv: Sequence[str] | None = None) -> int:
+    return gate_main(
+        TITLE,
+        run,
+        argv=sys.argv[1:] if argv is None else argv,
+        script=SCRIPT,
+        trial_stage_one_only_reason=TRIAL_STAGE_ONE_ONLY_REASON,
+    )
 
 
 if __name__ == "__main__":

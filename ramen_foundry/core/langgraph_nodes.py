@@ -93,6 +93,13 @@ class RamenToolNode:
     ``ramen_foundry.shadow`` and the tool is executed anyway. Evaluation
     failures, unverifiable ALLOW receipts, unregistered tools, and tool
     exceptions still fail closed.
+
+    After an evaluation, the returned ``ToolMessage.response_metadata`` reports the
+    receipt: ``receipt``, ``receipt_verified``, ``policy_ids`` and ``receipt_problem``.
+    A caller of ``execute()`` reads
+    ``command.update["messages"][-1].response_metadata["receipt_verified"]``. The
+    metadata is empty when no evaluation took place (a local pre-check blocked the
+    call, or the evaluation itself failed).
     """
 
     def __init__(
@@ -150,15 +157,47 @@ class RamenToolNode:
             return self._return_error(
                 invocation,
                 verdict.get("steering") or "Tool execution was blocked by ramen-ai policy.",
+                self._receipt_metadata(verdict, self._block_receipt_problem(invocation, verdict)),
             )
         unverified = self._unverified_allow(invocation, verdict)
         if unverified:
             return self._return_error(
                 invocation,
                 f"Tool execution was denied because the governance receipt could not be verified: {unverified}",
+                self._receipt_metadata(verdict, unverified),
             )
 
-        return self._dispatch(invocation)
+        return self._dispatch(invocation, self._receipt_metadata(verdict, None))
+
+    @staticmethod
+    def _receipt_metadata(verdict: Mapping[str, Any], problem: str | None) -> dict[str, Any]:
+        """Return the ``response_metadata`` that reports one evaluated verdict's receipt.
+
+        The keys match shadow mode and ``RamenSteerNode``: ``receipt`` (the Schema V5
+        receipt, or ``None``), ``receipt_verified`` (true only when the client's
+        verification and the independent signed-bytes check both hold),
+        ``policy_ids``, and ``receipt_problem`` (why it did not verify, else ``None``).
+        """
+        return {
+            "receipt": extract_receipt(verdict),
+            "receipt_verified": problem is None,
+            "policy_ids": [str(policy_id) for policy_id in verdict.get("policy_ids") or []],
+            "receipt_problem": problem,
+        }
+
+    def _block_receipt_problem(
+        self, invocation: ToolInvocation, verdict: Mapping[str, Any]
+    ) -> str | None:
+        """Return why a BLOCK verdict's receipt is not verifiable evidence of that BLOCK, or None."""
+        if not verdict.get("receipt_verified", False):
+            return (
+                _non_blank(verdict.get("receipt_reason"))
+                or _non_blank(verdict.get("receipt_alert"))
+                or "client did not verify the receipt"
+            )
+        return signed_verdict_problem(
+            verdict, self._payload(invocation), VERDICT_BLOCK, self._public_keys
+        )
 
     def _run_tool(self, invocation: ToolInvocation) -> Any:
         """Invoke the registered tool; raise ``_ToolDispatchError`` if it cannot run."""
@@ -217,16 +256,7 @@ class RamenToolNode:
         """
         receipt = extract_receipt(verdict)
         summary = _violation_summary(verdict)
-        if not verdict.get("receipt_verified", False):
-            problem: str | None = (
-                _non_blank(verdict.get("receipt_reason"))
-                or _non_blank(verdict.get("receipt_alert"))
-                or "client did not verify the receipt"
-            )
-        else:
-            problem = signed_verdict_problem(
-                verdict, self._payload(invocation), VERDICT_BLOCK, self._public_keys
-            )
+        problem = self._block_receipt_problem(invocation, verdict)
         receipt_id = receipt.get("id") if receipt is not None else None
         receipt_kid = receipt.get("kid") if receipt is not None else None
         record: dict[str, Any] = {
@@ -250,6 +280,7 @@ class RamenToolNode:
             "receipt": receipt,
             "receipt_verified": record["receipt_verified"],
             "policy_ids": list(record["policy_ids"]),
+            "receipt_problem": problem,
             SHADOW_METADATA_KEY: record,
         }
 
@@ -287,7 +318,13 @@ class RamenToolNode:
             provider_name=self._provider_name,
         )
 
-    def _return_error(self, invocation: ToolInvocation, reason: str) -> Command:
+    def _return_error(
+        self,
+        invocation: ToolInvocation,
+        reason: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Command:
+        """Return an error ``ToolMessage``; ``metadata`` is set only after an evaluation."""
         return Command(
             update={
                 "messages": [
@@ -296,6 +333,7 @@ class RamenToolNode:
                         tool_call_id=invocation.tool_call_id,
                         name=invocation.name,
                         status="error",
+                        response_metadata=dict(metadata or {}),
                     )
                 ],
                 "governance_error": reason,

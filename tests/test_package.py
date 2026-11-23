@@ -104,5 +104,16 @@ def test_the_package_version_matches_pyproject() -> None:
 def test_the_pyproject_pins_the_expected_extras() -> None:
     text = (ROOT / "pyproject.toml").read_text()
     assert re.search(r'^data = \[\s*"pandas>=2\.2\.3,<3\.0\.0",?\s*\]', text, re.M)
-    assert '"ramen-ai-core>=0.3.3,<0.5.0"' in text
+    assert '"ramen-ai-core>=0.3.5,<0.5.0"' in text
     assert "langgraph" in text  # still a default dependency
+
+
+def test_the_sdist_excludes_tests_ci_and_heavy_assets_but_keeps_the_sample_csv() -> None:
+    text = (ROOT / "pyproject.toml").read_text()
+    block = re.search(r"\[tool\.hatch\.build\.targets\.sdist\]\s*(?:#.*\n)*exclude = \[(.*?)\]", text, re.S)
+    assert block is not None
+    excluded = set(re.findall(r'"([^"]+)"', block.group(1)))
+    assert {"tests", ".github", "examples/assets", "recordings", "dist"} <= excluded
+    assert not any(path.startswith("examples/data") for path in excluded)
+    assert (ROOT / "examples" / "data" / "sample_documents.csv").is_file()
+

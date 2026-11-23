@@ -75,7 +75,6 @@ PLANNER_SCENE_CONTEXT = (
 ROBOTICS_PHYSICAL_SAFETY_POLICY_ID = "1fc71052-eb7e-43fe-9bfa-7ee06afe5b95"
 PRODUCTION_RECEIPT_KID = "ramen_pk_v1"
 ASSET_DIRECTORY = Path(__file__).resolve().parent / "assets" / "flagship_cutlery"
-INTEGRATIONS_ENV_PATH = Path(__file__).resolve().parents[2] / "ramen-ai-integrations" / ".env"
 
 PEDESTAL_HEIGHT_M = 0.34
 TABLE_SURFACE_Z_M = 0.10
@@ -1093,7 +1092,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     arguments = parser.parse_args(argv)
     governed = not arguments.ungoverned
-    environment = load_environment_credentials(shared_env_path=INTEGRATIONS_ENV_PATH)
+    environment = load_environment_credentials()
     provider_options = provider_options_from_environment(environment)
 
     plan = plan_dispatch(live_model=arguments.live_model, environment=environment)

@@ -59,20 +59,38 @@ pip install -e .
 
 python examples/authorization_gate_demo.py     # Stage 1 runs with no key and no network
 
+python examples/authorization_gate_demo.py --trial   # Stages 2 and 3 on the keyless public trial, no key
 export RAMEN_API_KEY="your-ramen-api-key"      # https://ramenai.dev/pricing
 python examples/authorization_gate_demo.py     # Stages 1 to 3 against api.ramenai.dev
 ```
 
-The same two commands work for `eligibility_gate_demo.py`, `provenance_gate_demo.py` and `kinematic_gate_demo.py`. Each full run makes two to four live evaluations, exits 0 on the expected BLOCK and ALLOW, and exits 1 on any other result. Set `OPENAI_API_KEY` as well to use OpenAI BYOK; without it ramen-ai uses managed-provider inference. The tools in the demos are simulated and change nothing.
+The same commands work for `eligibility_gate_demo.py`, `provenance_gate_demo.py` and `kinematic_gate_demo.py`. Each full run makes two to four live evaluations, exits 0 on the expected BLOCK and ALLOW, and exits 1 on any other result. Set `OPENAI_API_KEY` as well to use OpenAI BYOK; without it ramen-ai uses managed-provider inference. The tools in the demos are simulated and change nothing.
+
+**No API key?** Add `--trial` to run Stages 2 and 3 against the keyless public trial (`RamenClient.trial()`, `POST /api/v1/paas/try`). It allows about 10 requests per day per network, evaluates one bundle per request and limits each request body to 2,048 bytes. The authorization, eligibility and kinematic demos make two requests each. `provenance_gate_demo.py --trial` runs Stage 1 only, because its evidence (two receipts plus the derived verifier report) is about 3,000 bytes. When the day's allowance is used up, a demo prints what completed, the scope and the reset time (00:00 UTC), and exits 0. If `RAMEN_API_KEY` is set, `--trial` is ignored and the demo uses your key.
 
 ## Install
 
 ```bash
 pip install ramen-foundry
 pip install "ramen-foundry[data]"   # adds pandas for dataset filtration
+pip install -e ".[data]"            # from a clone of the repository (examples and tests)
 ```
 
 Python 3.10 or newer is required. Obtain a ramen-ai API key at [ramenai.dev/pricing](https://ramenai.dev/pricing), then provide credentials through your environment or secret manager:
+
+### Try it without a key
+
+`RamenClient.trial()` (ramen-ai-core 0.3.5 and later) is an explicit opt-in to the public keyless trial. `TrialComplianceClient` adapts it to the `evaluate_compliance` call that the templates, `RamenToolNode` and dataset filtration make:
+
+```python
+from ramen_foundry import DevboxShieldAgent, TrialComplianceClient
+
+with TrialComplianceClient() as client:
+    agent = DevboxShieldAgent(client=client, tools={"inspect_directory": inspect_directory})
+    command = agent.execute({"name": "inspect_directory", "arguments": {"path": "./build"}, "tool_call_id": "t1"})
+```
+
+The trial sends no credentials and no context, evaluates exactly one bundle per request (`policy_ids` are not supported), refuses a request body over 2,048 bytes before sending it, and allows about 10 requests per day per network. Every verdict carries a locally verified `trial_<uuid>` Schema V5 receipt. When the allowance is used up the call fails closed and the client keeps the typed `TrialLimitError` in `client.last_limit`; `describe_trial_limit(error)` formats the scope and reset time. `ProvenanceGateAgent` does not accept `trial_` receipts as evidence unless you pass `allow_trial_receipts=True`. For production, set `RAMEN_API_KEY` and use `RamenClient`.
 
 ```bash
 export RAMEN_API_KEY="your-ramen-api-key"
@@ -93,7 +111,9 @@ agent = DevboxShieldAgent(client=RamenClient(environ["RAMEN_API_KEY"]), tools={"
 command = agent.execute(ToolInvocation(name="inspect_directory", arguments={"path": "./build"}, tool_call_id="inspect-1"))
 ```
 
-`command` routes back to the configured LangGraph `llm_node` (default: `assistant`) with a `ToolMessage`, a cleared invocation, and either `governance_error=None` or an explicit denial/failure reason.
+`command` routes back to the configured LangGraph `llm_node` (default: `assistant`) with a `ToolMessage`, a cleared invocation, and either `governance_error=None` or an explicit denial/failure reason. The gate templates, `IndustrialAutomationAgent` and `CommercialLendingAgent` have no `llm_node` argument: their `execute(tool_name, payload)` returns a `Command` with `goto="__end__"` (LangGraph `END`), and the result is in `command.update`.
+
+**Did the receipt verify?** After an evaluation, the returned `ToolMessage` carries it in `response_metadata`: `receipt`, `receipt_verified`, `policy_ids` and `receipt_problem`. Read `command.update["messages"][-1].response_metadata["receipt_verified"]`. The metadata is empty when no evaluation took place (a local pre-check blocked the call, or the evaluation failed).
 
 ## Core engine architecture
 
@@ -344,7 +364,7 @@ agent = IndustrialAutomationAgent(client=RamenClient(environ["RAMEN_API_KEY"]), 
 command = agent.execute("adjust_plc_setpoint", supervisory_command)
 ```
 
-Use `agent.execute(tool_name, payload)` for direct evaluation or `agent.invoke({"tool_invocation": invocation, "messages": []})`/`agent.graph` for compiled LangGraph routing. Pass `provider_key` and `provider_name` together for BYOK; omit both for enterprise managed-provider mode.
+Use `agent.execute(tool_name, payload)` for direct evaluation or `agent.invoke({"tool_invocation": invocation, "messages": []})`/`agent.graph` for compiled LangGraph routing. Pass `provider_key` and `provider_name` together for BYOK; omit both for enterprise managed-provider mode. `execute()` returns a `Command` with `goto="__end__"`: the agent has no `llm_node`, so there is nothing to route back to, and the `ToolMessage`, `governance_error` and receipt metadata are in `command.update`.
 
 The policy evaluates represented evidence; Foundry does not query PLC/SIS hardware, certify operating envelopes, authenticate physical keys, validate MOC registries, or replace BPCS/SIF interlocks. Host tools must independently enforce local interlocks, least privilege, stale-telemetry rejection, network segmentation, human/physical authorization, operation IDs, and rollback-safe procedures.
 
@@ -495,7 +515,9 @@ Evidence is accepted only from Schema V5 receipts, verified locally against the 
 
 **No self-attestation.** The `verifier_report` the bundle evaluates is written by the template from the receipts it verified. A call that supplies its own `verifier_report`, `record_type_token_required` or `tokens_submitted_unmodified` is blocked. Schema V5 receipts are immutable signed statements with no revocation mechanism, so the derived report states them as not revoked and not superseded, and as current only while inside the age limit. LangChain passes a tool only the parameters its schema declares, so declare a `verifier_report` parameter if the tool should receive the derived report.
 
-Run it: `python examples/provenance_gate_demo.py` (self-attestation and a tampered receipt blocked locally, a batch blocked by the bundle, and a bound filing allowed).
+Receipts from the keyless trial (ids starting `trial_`) are not accepted as evidence unless you pass `allow_trial_receipts=True` to `ProvenanceGateAgent` or `ReceiptEvidenceVerifier`.
+
+Run it: `python examples/provenance_gate_demo.py` (self-attestation and a tampered receipt blocked locally, a batch blocked by the bundle, and a bound filing allowed). With `--trial` and no key it runs Stage 1 only, because its evidence exceeds the trial's 2,048-byte request limit.
 
 ### hrtech
 
@@ -580,6 +602,8 @@ print(result.audit_log[["row_index", "verdict", "receipt_verified"]])
 ```
 
 Strict exclusion drops blocked rows. Semantic imputation hands each blocked row and its steering string to a callback you supply, and fails closed on any callback error. See [dataset filtration](docs/data-filtration.md) for the full API, BYOK configuration and bundle guidance, and the [just-in-time training pipeline guide](docs/data-jit-training-pipeline.md) for PyTorch and TensorFlow patterns.
+
+With no API key, pass `trial=True` to `filter_dataframe` or `filter_csv` to evaluate on the keyless public trial (one bundle, about 10 requests per day per network, one request per row). A `FiltrationError` message names the failing row and the underlying cause, with credentials removed; `__cause__` holds the original exception. Try it with `python examples/filter_dataset.py --trial`, which filters the bundled five-row sample.
 
 ## Operational agent API
 
@@ -757,6 +781,7 @@ from ramen_foundry import (
     SQLiteMemoryStore,
     ScoutShieldAgent,
     ToolInvocation,
+    TrialComplianceClient,
     VendorExposure,
     VerifiedReceipt,
     manipulation_payload_problem,

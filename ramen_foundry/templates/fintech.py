@@ -97,7 +97,13 @@ class CommercialLendingAgent:
         *,
         tool_call_id: str | None = None,
     ) -> Command:
-        """Evaluate and directly execute one resolved commercial-lending action."""
+        """Evaluate and directly execute one resolved commercial-lending action.
+
+        The returned ``Command`` has ``goto=END`` (``"__end__"``): this agent has no
+        ``llm_node``. The ``ToolMessage`` in ``command.update["messages"]`` reports the
+        receipt in ``response_metadata`` (``receipt``, ``receipt_verified``,
+        ``policy_ids``, ``receipt_problem``) once an evaluation has taken place.
+        """
 
         invocation = ToolInvocation(
             name=tool_name,

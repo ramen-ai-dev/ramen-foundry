@@ -20,12 +20,14 @@ The tool is simulated: it records the approval and notifies no one.
 Run from the repository root::
 
     python examples/eligibility_gate_demo.py                      # Stage 1 only
+    python examples/eligibility_gate_demo.py --trial              # Stages 2 and 3 on the keyless trial
     RAMEN_API_KEY=... python examples/eligibility_gate_demo.py    # all three stages
 """
 
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.tools import tool
@@ -54,6 +56,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct-script import layout
     )
 
 TITLE = "Eligibility gate: local exclusions and platform-confirmed claim evidence"
+SCRIPT = "examples/eligibility_gate_demo.py"
 APPROVED_AMOUNT_USD = 63_000.0
 
 EXCLUSION_RULES = ExclusionRuleSet.model_validate(
@@ -188,8 +191,8 @@ def run(client: GateRecordingClient, *, live: bool = True, provider: dict[str, s
     return outcomes
 
 
-def main() -> int:
-    return gate_main(TITLE, run)
+def main(argv: Sequence[str] | None = None) -> int:
+    return gate_main(TITLE, run, argv=sys.argv[1:] if argv is None else argv, script=SCRIPT)
 
 
 if __name__ == "__main__":

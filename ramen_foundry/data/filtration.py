@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
@@ -17,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from ramen_ai import RamenClient
+from ramen_ai import RamenClient, TrialLimitError
+
+from ramen_foundry.trial import TrialComplianceClient, describe_trial_limit
 
 
 class FiltrationMode(str, Enum):
@@ -66,8 +69,9 @@ def filter_dataframe(
     policy_ids: Sequence[str] | None = None,
     remediable_columns: Sequence[str] | None = None,
     healing_callback: Callable[[dict[str, Any], str], dict[str, Any]] | None = None,
-    client: RamenClient | None = None,
+    client: RamenClient | TrialComplianceClient | None = None,
     api_key: str | None = None,
+    trial: bool = False,
     provider_key: str | None = None,
     provider_name: str | None = None,
     context: dict[str, str] | None = None,
@@ -83,7 +87,16 @@ def filter_dataframe(
     which values the callback may change.
 
     API, transport, and callback failures stop processing. Partial output is
-    never returned or written.
+    never returned or written. The message of the resulting ``FiltrationError``
+    names the failing row position and the underlying cause (clipped, with
+    credentials removed); the exception is also chained as ``__cause__``.
+
+    ``trial=True`` uses the keyless public trial instead of an API key: it reads
+    no environment credentials and sends none. The trial evaluates one bundle,
+    allows about 10 requests per day per network and rejects a row whose request
+    body exceeds 2,048 bytes, so it suits small samples only. The trial also
+    ignores ``policy_ids`` (a ``ValueError`` is raised), ``context`` and the
+    provider arguments.
     """
     if not isinstance(dataframe, pd.DataFrame):
         raise TypeError("dataframe must be a pandas DataFrame")
@@ -119,13 +132,18 @@ def filter_dataframe(
     evaluation_context["integration"] = "ramen-data-filter"
     evaluation_context.setdefault("source", "dataframe")
 
-    owned_client: RamenClient | None = None
+    owned_client: RamenClient | TrialComplianceClient | None = None
     active_client = client
-    if active_client is None:
+    resolved_api_key = ""
+    if active_client is None and trial:
+        owned_client = TrialComplianceClient(base_url=base_url, timeout=timeout)
+        active_client = owned_client
+    elif active_client is None:
         resolved_api_key = api_key or os.environ.get("RAMEN_API_KEY", "")
         if not resolved_api_key:
             raise FiltrationError(
-                "RAMEN_API_KEY is not set; dataset filtration cannot be evaluated"
+                "RAMEN_API_KEY is not set; dataset filtration cannot be evaluated. "
+                "Set it, or pass trial=True to use the keyless public trial (small samples only)."
             )
         owned_client = RamenClient(
             api_key=resolved_api_key,
@@ -133,6 +151,19 @@ def filter_dataframe(
             timeout=timeout,
         )
         active_client = owned_client
+    using_trial = isinstance(active_client, TrialComplianceClient)
+    secrets = tuple(
+        value
+        for value in (
+            resolved_api_key,
+            api_key,
+            provider_key,
+            os.environ.get("RAMEN_API_KEY"),
+            os.environ.get("OPENAI_API_KEY"),
+        )
+        if value
+    )
+    total_rows = len(dataframe)
 
     records: list[dict[str, Any]] = []
     try:
@@ -148,7 +179,9 @@ def filter_dataframe(
                     policy_ids=selected_policies or None,
                     context=evaluation_context,
                     provider_key=(
-                        provider_key
+                        None
+                        if using_trial
+                        else provider_key
                         if provider_key is not None
                         else os.environ.get("OPENAI_API_KEY")
                     ),
@@ -156,7 +189,8 @@ def filter_dataframe(
                 )
             except Exception as exc:
                 raise FiltrationError(
-                    f"ramen-ai evaluation failed for row position {position}"
+                    f"ramen-ai evaluation failed for row position {position}: "
+                    f"{_failure_detail(exc, secrets)}"
                 ) from exc
 
             if not isinstance(response, Mapping):
@@ -188,6 +222,14 @@ def filter_dataframe(
                 raise FiltrationError(
                     "ramen-ai policy_ids was not a list of non-empty strings "
                     f"for row position {position}"
+                )
+            remaining = _trial_remaining(response) if using_trial else None
+            rows_left = total_rows - position - 1
+            if remaining is not None and remaining < rows_left:
+                raise FiltrationError(
+                    f"the keyless trial has {remaining} evaluations left today but {rows_left} "
+                    f"rows remain after row position {position}; stopping. Use a smaller sample "
+                    "or an API key."
                 )
             records.append(
                 {
@@ -266,6 +308,29 @@ def filter_csv(
     return result
 
 
+_DETAIL_LIMIT = 300
+
+
+def _failure_detail(exc: BaseException, secrets: Sequence[str]) -> str:
+    """Return ``Type: message`` for ``exc``: whitespace-collapsed, credential-free, clipped."""
+    if isinstance(exc, TrialLimitError):
+        text = describe_trial_limit(exc)
+    else:
+        text = " ".join(str(exc).split())
+    for secret in sorted(set(secrets), key=len, reverse=True):
+        text = text.replace(secret, "***")
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1***", text)
+    if len(text) > _DETAIL_LIMIT:
+        text = text[: _DETAIL_LIMIT - 3] + "..."
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _trial_remaining(response: Mapping[str, Any]) -> int | None:
+    quota = response.get("trial")
+    remaining = quota.get("remaining") if isinstance(quota, Mapping) else None
+    return remaining if isinstance(remaining, int) and not isinstance(remaining, bool) else None
+
+
 def _validated_identifiers(
     name: str, values: Sequence[str] | None
 ) -> list[str]:
@@ -318,8 +383,10 @@ def _heal_blocked_rows(
         try:
             cured_row = healing_callback(deepcopy(original_row), steering)
         except Exception as exc:
+            # The message is left out: a callback's exception often quotes the row.
             raise FiltrationError(
-                f"healing callback failed for row position {position}"
+                f"healing callback failed for row position {position}: "
+                f"{type(exc).__name__} (see __cause__)"
             ) from exc
 
         if not isinstance(cured_row, dict):

@@ -19,12 +19,14 @@ simulations are ``examples/simulate_robotics_3d.py`` and ``examples/simulate_fla
 Run from the repository root::
 
     python examples/kinematic_gate_demo.py                      # Stage 1 only
+    python examples/kinematic_gate_demo.py --trial              # Stages 2 and 3 on the keyless trial
     RAMEN_API_KEY=... python examples/kinematic_gate_demo.py    # all three stages
 """
 
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.tools import tool
@@ -53,6 +55,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct-script import layout
     )
 
 TITLE = "Kinematic gate: manipulation payload contract and safety envelope"
+SCRIPT = "examples/kinematic_gate_demo.py"
 
 
 def collaborative_transfer() -> dict[str, Any]:
@@ -143,8 +146,8 @@ def run(client: GateRecordingClient, *, live: bool = True, provider: dict[str, s
     return outcomes
 
 
-def main() -> int:
-    return gate_main(TITLE, run)
+def main(argv: Sequence[str] | None = None) -> int:
+    return gate_main(TITLE, run, argv=sys.argv[1:] if argv is None else argv, script=SCRIPT)
 
 
 if __name__ == "__main__":

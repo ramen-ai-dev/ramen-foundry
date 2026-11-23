@@ -65,6 +65,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers and IDEs only
         VerifiedReceipt,
         manipulation_payload_problem,
     )
+    from .trial import TrialComplianceClient, describe_trial_limit
 
 _CORE_NAMES = frozenset(
     (
@@ -82,6 +83,7 @@ _CORE_NAMES = frozenset(
         "ToolInvocation",
     )
 )
+_TRIAL_NAMES = frozenset(("TrialComplianceClient", "describe_trial_limit"))
 _TEMPLATE_NAMES = frozenset(
     (
         "AUTHORIZATION_GATE_BUNDLE_ID",
@@ -175,12 +177,14 @@ __all__ = [
     "SQLiteMemoryStore",
     "ScoutShieldAgent",
     "ToolInvocation",
+    "TrialComplianceClient",
     "VendorExposure",
     "VerifiedReceipt",
+    "describe_trial_limit",
     "manipulation_payload_problem",
 ]
 
-__version__ = "0.2.7"
+__version__ = "0.2.8"
 
 
 def __getattr__(name: str) -> Any:
@@ -188,6 +192,8 @@ def __getattr__(name: str) -> Any:
         module = import_module(".core", __name__)
     elif name in _TEMPLATE_NAMES:
         module = import_module(".templates", __name__)
+    elif name in _TRIAL_NAMES:
+        module = import_module(".trial", __name__)
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     value = getattr(module, name)
